@@ -127,6 +127,12 @@ def _change_live_pixel_frame(path):
     raise AssertionError("fixture did not contain a pixel frame block")
 
 
+def _change_live_request(path):
+    request = json.loads(path.read_text())
+    request["sprite_engine_test_drift"] = True
+    path.write_text(json.dumps(request, sort_keys=True) + "\n")
+
+
 def _write_matching_curation_sidecar(store, project, data):
     run_dir = store.run_dir(project.id)
     sidecar = run_dir / "curation.json"
@@ -1090,3 +1096,185 @@ def test_valid_json_wrong_shape_curation_is_contained(tmp_path, operation, shape
 
     assert str(sidecar) not in str(failure.value)
     assert "AttributeError" not in str(failure.value)
+
+
+def test_extraction_request_artifact_matches_live_request_bytes(tmp_path):
+    store, project, engine, _, uploaded, prepared = _prepared_engine(tmp_path, frames=1)
+
+    extracted = engine.extract(project.id)
+    run_dir = store.run_dir(project.id)
+    state = json.loads((run_dir / "sprite-engine.json").read_text())
+
+    assert state["request_artifact_id"] == str(prepared.request_artifact_id)
+    assert store.read_artifact_bytes(project.id, state["request_artifact_id"]) == (
+        run_dir / "sprite-request.json"
+    ).read_bytes()
+    artifacts = {artifact.id: artifact for artifact in store.load(project.id).artifacts}
+    assert all(
+        artifacts[artifact_id].dependencies == [uploaded.id, prepared.request_artifact_id]
+        for artifact_id in (*extracted.plain_artifact_ids, *extracted.pixel_artifact_ids)
+    )
+
+
+@pytest.mark.parametrize("operation", ("extract", "load", "stamp", "compose", "inspect"))
+def test_live_request_drift_blocks_current_sprite_operations(tmp_path, operation):
+    store, project, engine, _, _, _ = _prepared_engine(tmp_path, frames=1)
+    engine.extract(project.id)
+    revision = engine.load_curation(project.id).run_revision
+    run_dir = store.run_dir(project.id)
+    before = json.loads((run_dir / "sprite-engine.json").read_text())
+    artifact_ids = {artifact.id for artifact in store.load(project.id).artifacts}
+    _change_live_request(run_dir / "sprite-request.json")
+
+    with pytest.raises(SpriteEngineError, match="request provenance"):
+        if operation == "extract":
+            engine.extract(project.id)
+        elif operation == "load":
+            engine.load_curation(project.id)
+        elif operation == "stamp":
+            engine.stamp_curation(
+                project.id,
+                {
+                    "version": 1,
+                    "kind": "sprite-gen-curation",
+                    "runRevision": revision,
+                    "states": {"upload": {"selected": [0]}},
+                },
+            )
+        elif operation == "compose":
+            engine.compose(project.id)
+        else:
+            engine.inspect(project.id)
+
+    assert json.loads((run_dir / "sprite-engine.json").read_text()) == {
+        "input_artifact_id": before["input_artifact_id"],
+        "request_artifact_id": before["request_artifact_id"],
+    }
+    assert {artifact.id for artifact in store.load(project.id).artifacts} == artifact_ids
+
+
+@pytest.mark.parametrize("operation", ("load", "compose"))
+@pytest.mark.parametrize(
+    ("states", "version"),
+    (
+        ({"upload": []}, 1),
+        ({"upload": {"pixel_perfect": False}}, 1),
+        ({"upload": {"clones": {"1": 0}}}, 1),
+        ({"upload": {"transforms": {"0": {"dx": 1}}}}, 1),
+        ({"upload": {"transforms": {"0": {"dx": 10**100}}}}, 1),
+        ({"upload": {"pixels": {"0": {"0,0": "#010203"}}}}, 1),
+        ({"hidden": {"selected": [0]}}, 1),
+        ({"upload": {"selected": [0]}}, 2),
+    ),
+    ids=(
+        "nested-list",
+        "plain",
+        "clones",
+        "off-grid-transform",
+        "huge-transform",
+        "partial-pixel-edit",
+        "unknown-row",
+        "wrong-version",
+    ),
+)
+def test_artifact_backed_curation_obeys_canonical_policy(tmp_path, operation, states, version):
+    store, project, engine, _, _, _ = _prepared_engine(tmp_path, frames=1)
+    engine.extract(project.id)
+    data = json.dumps(
+        {
+            "version": version,
+            "kind": "sprite-gen-curation",
+            "run_revision": engine.load_curation(project.id).run_revision,
+            "states": states,
+        }
+    ).encode()
+    sidecar = _write_matching_curation_sidecar(store, project, data)
+
+    with pytest.raises(SpriteEngineError, match="invalid sprite curation") as failure:
+        if operation == "load":
+            engine.load_curation(project.id)
+        else:
+            engine.compose(project.id)
+
+    assert str(sidecar) not in str(failure.value)
+    assert not [artifact for artifact in store.load(project.id).artifacts if artifact.kind == "sprite_atlas"]
+
+
+@pytest.mark.parametrize("change_live_frame", (False, True), ids=("unchanged", "changed"))
+def test_compose_overflow_is_contained_and_checks_live_frames(
+    tmp_path, monkeypatch, change_live_frame
+):
+    store, project, engine, _, _, _ = _prepared_engine(tmp_path, frames=1)
+    engine.extract(project.id)
+    run_dir = store.run_dir(project.id)
+    before = json.loads((run_dir / "sprite-engine.json").read_text())
+
+    import ai_sprite_studio.sprite_engine as sprite_engine
+
+    upstream_compose = sprite_engine.compose_atlas.run
+
+    def compose_then_overflow(*args, **kwargs):
+        upstream_compose(*args, **kwargs)
+        if change_live_frame:
+            manifest = json.loads((kwargs["run_dir"] / "frames/frames-manifest.json").read_text())
+            row = next(item for item in manifest["rows"] if item["state"] == "upload")
+            _change_live_pixel_frame(kwargs["run_dir"] / row["files"][0])
+        raise OverflowError(f"unsafe upstream diagnostic {kwargs['run_dir']}")
+
+    monkeypatch.setattr(sprite_engine.compose_atlas, "run", compose_then_overflow)
+
+    with pytest.raises(SpriteEngineError, match="sprite compose failed") as failure:
+        engine.compose(project.id)
+
+    assert "unsafe upstream" not in str(failure.value)
+    assert str(run_dir) not in str(failure.value)
+    state = json.loads((run_dir / "sprite-engine.json").read_text())
+    if change_live_frame:
+        assert state == {
+            "input_artifact_id": before["input_artifact_id"],
+            "request_artifact_id": before["request_artifact_id"],
+        }
+    else:
+        assert state == before
+
+
+def test_compose_lock_release_failure_invalidates_live_frame_drift(tmp_path, monkeypatch):
+    store, project, engine, _, _, _ = _prepared_engine(tmp_path, frames=1)
+    engine.extract(project.id)
+    revision = engine.load_curation(project.id).run_revision
+    engine.stamp_curation(
+        project.id,
+        {
+            "version": 1,
+            "kind": "sprite-gen-curation",
+            "runRevision": revision,
+            "states": {"upload": {"selected": [0]}},
+        },
+    )
+    engine.compose(project.id)
+    engine.inspect(project.id)
+    run_dir = store.run_dir(project.id)
+    before = json.loads((run_dir / "sprite-engine.json").read_text())
+
+    import ai_sprite_studio.sprite_engine as sprite_engine
+
+    upstream_release = sprite_engine.release_run_dir_lock
+
+    def release_then_change_frame_and_fail(path):
+        upstream_release(path)
+        manifest = json.loads((path / "frames/frames-manifest.json").read_text())
+        row = next(item for item in manifest["rows"] if item["state"] == "upload")
+        _change_live_pixel_frame(path / row["files"][0])
+        raise OSError(f"unsafe lock release {path}")
+
+    monkeypatch.setattr(sprite_engine, "release_run_dir_lock", release_then_change_frame_and_fail)
+
+    with pytest.raises(SpriteEngineError, match="sprite compose failed") as failure:
+        engine.compose(project.id)
+
+    assert "unsafe lock release" not in str(failure.value)
+    assert str(run_dir) not in str(failure.value)
+    assert json.loads((run_dir / "sprite-engine.json").read_text()) == {
+        "input_artifact_id": before["input_artifact_id"],
+        "request_artifact_id": before["request_artifact_id"],
+    }
