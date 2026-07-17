@@ -1,16 +1,25 @@
-"""Atomic, contained filesystem storage for sprite projects."""
+"""Atomic, contained filesystem storage for sprite projects.
+
+The store requires POSIX descriptor-relative operations and keeps directory
+descriptors open while it walks a workspace.  That makes a rename or a symlink
+swap of a pathname harmless for the operation already in progress.  The
+returned :class:`~pathlib.Path` from ``get_artifact`` necessarily has a
+post-return race; callers that need a stable file handle should read it before
+handing control to an untrusted local writer.
+"""
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import errno
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
-import shutil
-import tempfile
-from typing import Iterable
+import secrets
+import stat
+from typing import Iterable, Iterator
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
@@ -19,14 +28,34 @@ from .contracts import Approval, ApprovalGate, ArtifactRef, ArtifactVariant, Pro
 
 
 _UNSUPPORTED_FSYNC_ERRNOS = {errno.EINVAL, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}
+_DIRFD_STORAGE_AVAILABLE = (
+    os.name == "posix"
+    and all(hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW"))
+    and all(
+        operation in os.supports_dir_fd
+        for operation in (os.open, os.mkdir, os.stat, os.unlink, os.rmdir, os.rename, os.link)
+    )
+    and os.link in os.supports_follow_symlinks
+)
 
 
 class ProjectStoreError(ValueError):
     """A project file or requested storage operation is unsafe or invalid."""
 
 
+class _WriteFailure(ProjectStoreError):
+    """A write failure annotated with whether its destination was published."""
+
+    def __init__(self, message: str, *, published: bool, collision: bool = False):
+        super().__init__(message)
+        self.published = published
+        self.collision = collision
+
+
 class ProjectStore:
     def __init__(self, workspace: str | Path):
+        if not _DIRFD_STORAGE_AVAILABLE:
+            raise ProjectStoreError("secure descriptor-relative storage is unavailable on this platform")
         self.workspace = Path(workspace).expanduser().resolve()
         self.projects = self.workspace / "projects"
 
@@ -34,58 +63,24 @@ class ProjectStore:
         project = self._validate_project(project or ProjectConfig())
         if project.artifacts or project.approvals:
             raise ProjectStoreError("new projects cannot include externally supplied artifacts or approvals")
-
-        projects_root = self._projects_root()
-        target = projects_root / str(project.id)
-        if os.path.lexists(target):
-            raise ProjectStoreError("project already exists")
-
-        payload = self._project_json(project)
-        staging = Path(tempfile.mkdtemp(prefix=f".{project.id}.", dir=projects_root))
-        try:
-            for directory in ("inputs", "candidates", "run", "videos", "prompts", "jobs", "exports"):
-                (staging / directory).mkdir()
-            self._atomic_write(staging, staging / "events.ndjson", b"", overwrite=False)
-            self._atomic_write(staging, staging / "project.json", payload, overwrite=False)
-            self._contained(staging, projects_root)
-            self._contained(target.parent, projects_root)
-            os.replace(staging, target)
-            self._fsync_directory(projects_root)
-        except OSError as exc:
-            raise ProjectStoreError(f"could not create project: {exc}") from exc
-        finally:
-            if staging.exists():
-                shutil.rmtree(staging)
-        return project
+        return self._create_at(project)
 
     def load(self, project_id: UUID | str) -> ProjectConfig:
         project_id = self._uuid(project_id, "project ID")
-        root = self._project_root(project_id)
-        project_path = self._safe_path(root, "project.json", require_exists=True)
-        try:
-            raw = json.loads(project_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ProjectStoreError("malformed project JSON") from exc
-        if not isinstance(raw, dict) or raw.get("schema_version") != 1:
-            raise ProjectStoreError("unsupported project schema version")
-        try:
-            project = ProjectConfig.model_validate(raw)
-        except ValidationError as exc:
-            raise ProjectStoreError(f"invalid project JSON: {exc}") from exc
-        if project.id != project_id:
-            raise ProjectStoreError("project ID does not match its directory")
-        return project
+        with self._project_fd(project_id) as project_fd:
+            return self._load_at(project_fd, project_id)
 
     def save(self, project: ProjectConfig) -> ProjectConfig:
         project = self._validate_project(project)
-        current = self.load(project.id)
-        if project.artifacts != current.artifacts or project.approvals != current.approvals:
-            raise ProjectStoreError("artifacts and approvals are managed by ProjectStore")
-        saved = project.model_copy(
-            update={"created_at": current.created_at, "updated_at": self._now()}
-        )
-        self._write_project(self._project_root(saved.id), saved)
-        return saved
+        with self._project_fd(project.id) as project_fd:
+            current = self._load_at(project_fd, project.id)
+            if project.artifacts != current.artifacts or project.approvals != current.approvals:
+                raise ProjectStoreError("artifacts and approvals are managed by ProjectStore")
+            saved = project.model_copy(
+                update={"created_at": current.created_at, "updated_at": self._now()}
+            )
+            self._write_project_at(project_fd, saved)
+            return saved
 
     def put_artifact(
         self,
@@ -106,74 +101,34 @@ class ProjectStore:
         if not isinstance(media_type, str) or not media_type.strip():
             raise ProjectStoreError("media type must be a non-empty string")
         project_id = self._uuid(project_id, "project ID")
-        project = self.load(project_id)
-        root = self._project_root(project_id)
         dependency_ids = [self._uuid(item, "dependency ID") for item in dependencies]
         if len(dependency_ids) != len(set(dependency_ids)):
             raise ProjectStoreError("duplicate dependency ID")
-        known_ids = {artifact.id for artifact in project.artifacts}
-        if any(item not in known_ids for item in dependency_ids):
-            raise ProjectStoreError("unknown dependency artifact")
-
-        extension = self._extension_for(media_type)
-        if kind == "input":
-            stage_name = None
-        else:
-            stage_name = self._safe_component(stage or kind, "stage")
-        for _ in range(16):
-            artifact_id = uuid4()
-            if artifact_id in known_ids:
-                continue
-            relative_path = (
-                f"inputs/{artifact_id}.{extension}"
-                if stage_name is None
-                else f"candidates/{stage_name}/{artifact_id}/{variant}.{extension}"
-            )
-            artifact_path = self._safe_path(root, relative_path)
-            if not os.path.lexists(artifact_path):
-                break
-        else:
-            raise ProjectStoreError("could not allocate a unique artifact ID")
-        try:
-            artifact = ArtifactRef(
-                id=artifact_id,
-                kind=kind,
-                relative_path=relative_path,
-                sha256=hashlib.sha256(data).hexdigest(),
-                media_type=media_type,
-                width=width,
-                height=height,
-                variant=variant,
-                source_job_id=source_job_id,
-                dependencies=dependency_ids,
-            )
-        except ValidationError as exc:
-            raise ProjectStoreError(f"invalid artifact: {exc}") from exc
-
-        project_path = self._safe_path(root, "project.json", require_exists=True)
-        updated = project.model_copy(
-            update={"artifacts": [*project.artifacts, artifact], "updated_at": self._now()}
+        return self._put_artifact_at(
+            project_id,
+            data,
+            kind=kind,
+            media_type=media_type,
+            variant=variant,
+            stage=stage,
+            width=width,
+            height=height,
+            source_job_id=source_job_id,
+            dependency_ids=dependency_ids,
         )
-        payload = self._project_json(updated)
-        # Both destinations have been validated before either file is changed.
-        self._ensure_parent(root, artifact_path)
-        try:
-            self._atomic_write(root, artifact_path, data, overwrite=False)
-            self._atomic_write(root, project_path, payload, overwrite=True)
-        except Exception:
-            self._remove_new_artifact(root, artifact_path)
-            raise
-        return artifact
 
     def get_artifact(self, project_id: UUID | str, artifact_id: UUID | str) -> Path:
         project_id = self._uuid(project_id, "project ID")
         artifact_id = self._uuid(artifact_id, "artifact ID")
-        project = self.load(project_id)
-        artifact = next((item for item in project.artifacts if item.id == artifact_id), None)
-        if artifact is None:
-            raise ProjectStoreError("unknown artifact")
-        root = self._project_root(project_id)
-        return self._artifact_path(root, artifact)
+        with self._project_fd(project_id) as project_fd:
+            project = self._load_at(project_fd, project_id)
+            artifact = next((item for item in project.artifacts if item.id == artifact_id), None)
+            if artifact is None:
+                raise ProjectStoreError("unknown artifact")
+            # Verify this exact entry through the pinned directory before
+            # returning the compatibility Path object.
+            self._read_artifact_at(project_fd, artifact, digest=False)
+            return self.projects.joinpath(str(project_id), *self._relative_parts(artifact.relative_path))
 
     def approve(
         self,
@@ -184,25 +139,467 @@ class ProjectStore:
         note: str = "",
     ) -> Approval:
         project_id = self._uuid(project_id, "project ID")
-        project = self.load(project_id)
-        root = self._project_root(project_id)
-        if isinstance(gate, Approval):
-            if artifact_ids is not None:
-                raise ProjectStoreError("artifact IDs must be part of the approval record")
-            approval = gate
-        else:
-            ids = [self._uuid(item, "artifact ID") for item in artifact_ids or ()]
-            try:
-                approval = Approval(
-                    gate=gate,
-                    artifact_ids=ids,
-                    artifact_hashes=["0" * 64 for _ in ids],
-                    note=note,
-                )
-            except ValidationError as exc:
-                raise ProjectStoreError(f"invalid approval: {exc}") from exc
+        with self._project_fd(project_id) as project_fd:
+            project = self._load_at(project_fd, project_id)
+            approval = self._approval_for(gate, artifact_ids, note)
+            artifacts = {artifact.id: artifact for artifact in project.artifacts}
+            current_hashes = self._approval_hashes_at(project_fd, approval, artifacts)
+            if isinstance(gate, Approval):
+                if approval.artifact_hashes != current_hashes:
+                    raise ProjectStoreError("approval hashes do not match current artifacts")
+            else:
+                approval = approval.model_copy(update={"artifact_hashes": current_hashes})
+            updated = project.model_copy(
+                update={
+                    "approvals": [item for item in project.approvals if item.gate != approval.gate]
+                    + [approval],
+                    "updated_at": self._now(),
+                }
+            )
+            self._write_project_at(project_fd, updated)
+            return approval
 
-        artifacts = {artifact.id: artifact for artifact in project.artifacts}
+    def invalidate_dependants(
+        self, project_id: UUID | str, artifact_ids: Iterable[UUID | str]
+    ) -> list[UUID]:
+        project_id = self._uuid(project_id, "project ID")
+        with self._project_fd(project_id) as project_fd:
+            project = self._load_at(project_fd, project_id)
+            ordered, updated = self._invalidate(project, artifact_ids)
+            if updated is not None:
+                self._write_project_at(project_fd, updated)
+            return ordered
+
+    # POSIX descriptor-relative implementation ---------------------------------
+
+    @classmethod
+    def _directory_flags(cls) -> int:
+        return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+    @contextmanager
+    def _workspace_fd(self, *, create: bool) -> Iterator[int]:
+        descriptor = self._open_workspace_fd(create=create)
+        try:
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    def _open_workspace_fd(self, *, create: bool) -> int:
+        path = self.workspace
+        if not path.is_absolute():
+            path = path.absolute()
+        descriptor = os.open(path.anchor or "/", self._directory_flags())
+        try:
+            for part in path.parts:
+                if part == path.anchor:
+                    continue
+                child = self._open_directory_at(
+                    descriptor, part, create=create, label="workspace"
+                )
+                os.close(descriptor)
+                descriptor = child
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    @contextmanager
+    def _projects_fd(self, *, create: bool) -> Iterator[int]:
+        with self._workspace_fd(create=create) as workspace_fd:
+            try:
+                descriptor = self._open_directory_at(
+                    workspace_fd, "projects", create=create, label="projects"
+                )
+            except FileNotFoundError as exc:
+                raise ProjectStoreError("workspace projects directory is missing") from exc
+            except ProjectStoreError as exc:
+                raise ProjectStoreError("workspace projects path resolves outside workspace") from exc
+            try:
+                yield descriptor
+            finally:
+                os.close(descriptor)
+
+    @contextmanager
+    def _project_fd(self, project_id: UUID) -> Iterator[int]:
+        with self._projects_fd(create=False) as projects_fd:
+            try:
+                descriptor = self._open_directory_at(
+                    projects_fd, str(project_id), create=False, label="project"
+                )
+            except FileNotFoundError as exc:
+                raise ProjectStoreError("unknown project") from exc
+            try:
+                yield descriptor
+            finally:
+                os.close(descriptor)
+
+    @classmethod
+    def _open_directory_at(
+        cls, parent_fd: int, name: str, *, create: bool, label: str
+    ) -> int:
+        try:
+            return os.open(name, cls._directory_flags(), dir_fd=parent_fd)
+        except FileNotFoundError:
+            if not create:
+                raise
+        except OSError as exc:
+            raise ProjectStoreError(f"unsafe {label} directory: {exc}") from exc
+
+        try:
+            os.mkdir(name, 0o755, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise ProjectStoreError(f"could not create {label} directory: {exc}") from exc
+        try:
+            return os.open(name, cls._directory_flags(), dir_fd=parent_fd)
+        except OSError as exc:
+            raise ProjectStoreError(f"unsafe {label} directory: {exc}") from exc
+
+    @contextmanager
+    def _parent_fd_at(
+        self, project_fd: int, relative_path: str, *, create: bool
+    ) -> Iterator[tuple[int, str]]:
+        parts = self._relative_parts(relative_path)
+        descriptor = os.dup(project_fd)
+        try:
+            for part in parts[:-1]:
+                child = self._open_directory_at(
+                    descriptor, part, create=create, label="project"
+                )
+                os.close(descriptor)
+                descriptor = child
+            yield descriptor, parts[-1]
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _entry_exists_at(cls, parent_fd: int, name: str) -> bool:
+        try:
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise ProjectStoreError(f"could not inspect stored path: {exc}") from exc
+        return True
+
+    @classmethod
+    @contextmanager
+    def _regular_file_fd_at(cls, parent_fd: int, name: str) -> Iterator[int]:
+        try:
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            raise ProjectStoreError("stored path resolves outside the project or is missing") from exc
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ProjectStoreError("stored artifact is not a file")
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _read_file_at(cls, parent_fd: int, name: str) -> bytes:
+        with cls._regular_file_fd_at(parent_fd, name) as descriptor:
+            chunks: list[bytes] = []
+            while chunk := os.read(descriptor, 1024 * 1024):
+                chunks.append(chunk)
+        return b"".join(chunks)
+
+    def _load_at(self, project_fd: int, project_id: UUID) -> ProjectConfig:
+        try:
+            raw_bytes = self._read_file_at(project_fd, "project.json")
+            raw = json.loads(raw_bytes)
+        except (ProjectStoreError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProjectStoreError("malformed project JSON") from exc
+        if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+            raise ProjectStoreError("unsupported project schema version")
+        try:
+            project = ProjectConfig.model_validate(raw)
+        except ValidationError as exc:
+            raise ProjectStoreError(f"invalid project JSON: {exc}") from exc
+        if project.id != project_id:
+            raise ProjectStoreError("project ID does not match its directory")
+        return project
+
+    @classmethod
+    def _temporary_name(cls, target_name: str) -> str:
+        return f".{target_name}.{secrets.token_hex(16)}"
+
+    @classmethod
+    def _atomic_write_at(
+        cls, parent_fd: int, target_name: str, data: bytes, *, overwrite: bool
+    ) -> None:
+        temporary_name: str | None = None
+        descriptor = -1
+        published = False
+        try:
+            for _ in range(16):
+                candidate = cls._temporary_name(target_name)
+                try:
+                    descriptor = os.open(
+                        candidate,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=parent_fd,
+                    )
+                except FileExistsError:
+                    continue
+                except OSError as exc:
+                    raise _WriteFailure(
+                        f"could not create temporary storage file: {exc}", published=False
+                    ) from exc
+                temporary_name = candidate
+                break
+            else:
+                raise _WriteFailure("could not allocate temporary storage file", published=False)
+
+            try:
+                with os.fdopen(descriptor, "wb") as file:
+                    descriptor = -1
+                    file.write(data)
+                    file.flush()
+                    cls._fsync(file.fileno())
+            except ProjectStoreError as exc:
+                raise _WriteFailure(str(exc), published=False) from exc
+            except OSError as exc:
+                raise _WriteFailure(f"could not write storage file: {exc}", published=False) from exc
+
+            try:
+                if overwrite:
+                    os.replace(
+                        temporary_name,
+                        target_name,
+                        src_dir_fd=parent_fd,
+                        dst_dir_fd=parent_fd,
+                    )
+                    temporary_name = None
+                    published = True
+                else:
+                    # link(2) is the immutable publication point: it fails if
+                    # another writer wins the race, unlike replace(2).
+                    os.link(
+                        temporary_name,
+                        target_name,
+                        src_dir_fd=parent_fd,
+                        dst_dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                    published = True
+                    os.unlink(temporary_name, dir_fd=parent_fd)
+                    temporary_name = None
+            except FileExistsError as exc:
+                raise _WriteFailure(
+                    "refusing to overwrite an immutable candidate",
+                    published=False,
+                    collision=not overwrite,
+                ) from exc
+            except OSError as exc:
+                action = "replace" if overwrite else "publish"
+                raise _WriteFailure(
+                    f"could not {action} storage file: {exc}", published=published
+                ) from exc
+
+            try:
+                cls._fsync_directory_fd(parent_fd)
+            except ProjectStoreError as exc:
+                # A successful rename/link is visible even if its durability
+                # barrier fails, so callers must treat it as published.
+                raise _WriteFailure(str(exc), published=published) from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary_name is not None:
+                try:
+                    os.unlink(temporary_name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    # Do not hide the write error; a later operation can clean
+                    # an abandoned private temporary file.
+                    pass
+
+    @classmethod
+    def _remove_entry_at(cls, parent_fd: int, name: str) -> None:
+        try:
+            os.unlink(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise ProjectStoreError(f"could not roll back artifact: {exc}") from exc
+        cls._fsync_directory_fd(parent_fd)
+
+    @classmethod
+    def _fsync_directory_fd(cls, descriptor: int) -> None:
+        cls._fsync(descriptor)
+
+    def _create_at(self, project: ProjectConfig) -> ProjectConfig:
+        with self._projects_fd(create=True) as projects_fd:
+            target_name = str(project.id)
+            if self._entry_exists_at(projects_fd, target_name):
+                raise ProjectStoreError("project already exists")
+            staging_name = f".{project.id}.{secrets.token_hex(16)}"
+            try:
+                os.mkdir(staging_name, 0o700, dir_fd=projects_fd)
+            except OSError as exc:
+                raise ProjectStoreError(f"could not create project: {exc}") from exc
+
+            published = False
+            try:
+                with self._opened_directory_at(projects_fd, staging_name, label="project") as staging_fd:
+                    for directory in (
+                        "inputs",
+                        "candidates",
+                        "run",
+                        "videos",
+                        "prompts",
+                        "jobs",
+                        "exports",
+                    ):
+                        os.mkdir(directory, 0o755, dir_fd=staging_fd)
+                    self._atomic_write_at(staging_fd, "events.ndjson", b"", overwrite=False)
+                    self._atomic_write_at(
+                        staging_fd, "project.json", self._project_json(project), overwrite=False
+                    )
+                os.replace(
+                    staging_name,
+                    target_name,
+                    src_dir_fd=projects_fd,
+                    dst_dir_fd=projects_fd,
+                )
+                published = True
+                self._fsync_directory_fd(projects_fd)
+            except _WriteFailure as exc:
+                raise ProjectStoreError(str(exc)) from exc
+            except OSError as exc:
+                raise ProjectStoreError(f"could not create project: {exc}") from exc
+            finally:
+                if not published:
+                    self._remove_tree_at(projects_fd, staging_name)
+        return project
+
+    @contextmanager
+    def _opened_directory_at(self, parent_fd: int, name: str, *, label: str) -> Iterator[int]:
+        descriptor = self._open_directory_at(parent_fd, name, create=False, label=label)
+        try:
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _remove_tree_at(cls, parent_fd: int, name: str) -> None:
+        try:
+            descriptor = cls._open_directory_at(parent_fd, name, create=False, label="project")
+        except (FileNotFoundError, ProjectStoreError):
+            return
+        try:
+            for child in os.listdir(descriptor):
+                try:
+                    mode = os.stat(child, dir_fd=descriptor, follow_symlinks=False).st_mode
+                    if stat.S_ISDIR(mode):
+                        cls._remove_tree_at(descriptor, child)
+                    else:
+                        os.unlink(child, dir_fd=descriptor)
+                except FileNotFoundError:
+                    pass
+        finally:
+            os.close(descriptor)
+        try:
+            os.rmdir(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+
+    def _put_artifact_at(
+        self,
+        project_id: UUID,
+        data: bytes,
+        *,
+        kind: str,
+        media_type: str,
+        variant: ArtifactVariant,
+        stage: str | None,
+        width: int | None,
+        height: int | None,
+        source_job_id: UUID | str | None,
+        dependency_ids: list[UUID],
+    ) -> ArtifactRef:
+        with self._project_fd(project_id) as project_fd:
+            project = self._load_at(project_fd, project_id)
+            known_ids = {artifact.id for artifact in project.artifacts}
+            if any(item not in known_ids for item in dependency_ids):
+                raise ProjectStoreError("unknown dependency artifact")
+            extension = self._extension_for(media_type)
+            stage_name = None if kind == "input" else self._safe_component(stage or kind, "stage")
+
+            for _ in range(16):
+                artifact_id = uuid4()
+                if artifact_id in known_ids:
+                    continue
+                relative_path = (
+                    f"inputs/{artifact_id}.{extension}"
+                    if stage_name is None
+                    else f"candidates/{stage_name}/{artifact_id}/{variant}.{extension}"
+                )
+                try:
+                    artifact = ArtifactRef(
+                        id=artifact_id,
+                        kind=kind,
+                        relative_path=relative_path,
+                        sha256=hashlib.sha256(data).hexdigest(),
+                        media_type=media_type,
+                        width=width,
+                        height=height,
+                        variant=variant,
+                        source_job_id=source_job_id,
+                        dependencies=dependency_ids,
+                    )
+                except ValidationError as exc:
+                    raise ProjectStoreError(f"invalid artifact: {exc}") from exc
+
+                updated = project.model_copy(
+                    update={"artifacts": [*project.artifacts, artifact], "updated_at": self._now()}
+                )
+                with self._parent_fd_at(project_fd, relative_path, create=True) as (parent_fd, name):
+                    if self._entry_exists_at(parent_fd, name):
+                        continue
+                    try:
+                        self._atomic_write_at(parent_fd, name, data, overwrite=False)
+                    except _WriteFailure as exc:
+                        if exc.collision:
+                            continue
+                        if exc.published:
+                            self._remove_entry_at(parent_fd, name)
+                        raise
+
+                    try:
+                        self._write_project_at(project_fd, updated)
+                    except _WriteFailure as exc:
+                        # Only remove the candidate when we know project.json
+                        # did not cross its rename publication point.
+                        if not exc.published:
+                            self._remove_entry_at(parent_fd, name)
+                        raise
+                return artifact
+        raise ProjectStoreError("could not allocate a unique artifact ID")
+
+    def _write_project_at(self, project_fd: int, project: ProjectConfig) -> None:
+        self._atomic_write_at(project_fd, "project.json", self._project_json(project), overwrite=True)
+
+    def _read_artifact_at(self, project_fd: int, artifact: ArtifactRef, *, digest: bool) -> str | None:
+        with self._parent_fd_at(project_fd, artifact.relative_path, create=False) as (parent_fd, name):
+            with self._regular_file_fd_at(parent_fd, name) as descriptor:
+                if not digest:
+                    return None
+                value = hashlib.sha256()
+                while chunk := os.read(descriptor, 1024 * 1024):
+                    value.update(chunk)
+        result = value.hexdigest()
+        if result != artifact.sha256:
+            raise ProjectStoreError("artifact hash does not match its record")
+        return result
+
+    def _approval_hashes_at(
+        self, project_fd: int, approval: Approval, artifacts: dict[UUID, ArtifactRef]
+    ) -> list[str]:
         current_hashes: list[str] = []
         for artifact_id in approval.artifact_ids:
             artifact = artifacts.get(artifact_id)
@@ -210,34 +607,37 @@ class ProjectStore:
                 raise ProjectStoreError("unknown artifact")
             if artifact.stale:
                 raise ProjectStoreError("cannot approve a stale artifact")
-            current_hashes.append(self._live_hash(root, artifact))
+            current_hashes.append(self._read_artifact_at(project_fd, artifact, digest=True) or "")
+        return current_hashes
 
+    def _approval_for(
+        self,
+        gate: ApprovalGate | Approval,
+        artifact_ids: Iterable[UUID | str] | None,
+        note: str,
+    ) -> Approval:
         if isinstance(gate, Approval):
-            if approval.artifact_hashes != current_hashes:
-                raise ProjectStoreError("approval hashes do not match current artifacts")
-        else:
-            approval = approval.model_copy(update={"artifact_hashes": current_hashes})
+            if artifact_ids is not None:
+                raise ProjectStoreError("artifact IDs must be part of the approval record")
+            return gate
+        ids = [self._uuid(item, "artifact ID") for item in artifact_ids or ()]
+        try:
+            return Approval(
+                gate=gate,
+                artifact_ids=ids,
+                artifact_hashes=["0" * 64 for _ in ids],
+                note=note,
+            )
+        except ValidationError as exc:
+            raise ProjectStoreError(f"invalid approval: {exc}") from exc
 
-        updated = project.model_copy(
-            update={
-                "approvals": [item for item in project.approvals if item.gate != approval.gate]
-                + [approval],
-                "updated_at": self._now(),
-            }
-        )
-        self._write_project(root, updated)
-        return approval
-
-    def invalidate_dependants(
-        self, project_id: UUID | str, artifact_ids: Iterable[UUID | str]
-    ) -> list[UUID]:
-        project_id = self._uuid(project_id, "project ID")
-        project = self.load(project_id)
+    def _invalidate(
+        self, project: ProjectConfig, artifact_ids: Iterable[UUID | str]
+    ) -> tuple[list[UUID], ProjectConfig | None]:
         changed = {self._uuid(item, "artifact ID") for item in artifact_ids}
         known_ids = {artifact.id for artifact in project.artifacts}
         if not changed.issubset(known_ids):
             raise ProjectStoreError("unknown artifact")
-
         invalidated: set[UUID] = set()
         frontier = set(changed)
         while frontier:
@@ -249,10 +649,12 @@ class ProjectStore:
             }
             invalidated.update(descendants)
             frontier = descendants
-
         ordered = [artifact.id for artifact in project.artifacts if artifact.id in invalidated]
-        if ordered:
-            updated = project.model_copy(
+        if not ordered:
+            return ordered, None
+        return (
+            ordered,
+            project.model_copy(
                 update={
                     "artifacts": [
                         artifact.model_copy(update={"stale": True})
@@ -262,42 +664,11 @@ class ProjectStore:
                     ],
                     "updated_at": self._now(),
                 }
-            )
-            self._write_project(self._project_root(project_id), updated)
-        return ordered
-
-    def _projects_root(self) -> Path:
-        try:
-            self.projects.mkdir(parents=True, exist_ok=True)
-            root = self.projects.resolve()
-        except OSError as exc:
-            raise ProjectStoreError(f"could not create workspace: {exc}") from exc
-        if not root.is_dir():
-            raise ProjectStoreError("workspace projects path is not a directory")
-        try:
-            root.relative_to(self.workspace)
-        except ValueError as exc:
-            raise ProjectStoreError("workspace projects path resolves outside workspace") from exc
-        return root
-
-    def _project_root(self, project_id: UUID) -> Path:
-        projects_root = self._projects_root()
-        root = projects_root / str(project_id)
-        resolved = self._contained(root, projects_root)
-        if not resolved.is_dir():
-            raise ProjectStoreError("unknown project")
-        return resolved
-
-    def _write_project(self, root: Path, project: ProjectConfig) -> None:
-        self._atomic_write(
-            root,
-            self._safe_path(root, "project.json", require_exists=True),
-            self._project_json(project),
-            overwrite=True,
+            ),
         )
 
     @classmethod
-    def _safe_path(cls, root: Path, relative_path: str, *, require_exists: bool = False) -> Path:
+    def _relative_parts(cls, relative_path: str) -> tuple[str, ...]:
         try:
             relative = PurePosixPath(relative_path)
         except TypeError as exc:
@@ -310,93 +681,7 @@ class ProjectStore:
             or any(part in {"", ".", ".."} for part in relative.parts)
         ):
             raise ProjectStoreError("unsafe relative path")
-        path = root.joinpath(*relative.parts)
-        resolved = cls._contained(path, root)
-        if require_exists and not resolved.exists():
-            raise ProjectStoreError("stored path is missing")
-        return resolved
-
-    @staticmethod
-    def _contained(path: Path, root: Path) -> Path:
-        try:
-            resolved = path.resolve(strict=False)
-            resolved.relative_to(root.resolve())
-        except (OSError, ValueError) as exc:
-            raise ProjectStoreError("path resolves outside the project") from exc
-        return resolved
-
-    @classmethod
-    def _artifact_path(cls, root: Path, artifact: ArtifactRef) -> Path:
-        path = cls._safe_path(root, artifact.relative_path, require_exists=True)
-        if not path.is_file():
-            raise ProjectStoreError("stored artifact is not a file")
-        cls._contained(path, root)
-        return path
-
-    @classmethod
-    def _live_hash(cls, root: Path, artifact: ArtifactRef) -> str:
-        path = cls._artifact_path(root, artifact)
-        digest = hashlib.sha256()
-        try:
-            cls._contained(path, root)
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-            with os.fdopen(os.open(path, flags), "rb") as file:
-                for chunk in iter(lambda: file.read(1024 * 1024), b""):
-                    digest.update(chunk)
-        except (OSError, ProjectStoreError) as exc:
-            raise ProjectStoreError("could not safely read artifact") from exc
-        value = digest.hexdigest()
-        if value != artifact.sha256:
-            raise ProjectStoreError("artifact hash does not match its record")
-        return value
-
-    @classmethod
-    def _ensure_parent(cls, root: Path, target: Path) -> None:
-        cls._contained(target.parent, root)
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise ProjectStoreError(f"could not prepare artifact directory: {exc}") from exc
-        cls._contained(target.parent, root)
-
-    @classmethod
-    def _atomic_write(cls, root: Path, target: Path, data: bytes, *, overwrite: bool) -> None:
-        cls._contained(target.parent, root)
-        if not overwrite and os.path.lexists(target):
-            raise ProjectStoreError("refusing to overwrite an immutable candidate")
-        try:
-            descriptor, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
-        except OSError as exc:
-            raise ProjectStoreError(f"could not create temporary storage file: {exc}") from exc
-        temporary_path = Path(temporary)
-        try:
-            with os.fdopen(descriptor, "wb") as file:
-                cls._contained(temporary_path.parent, root)
-                cls._contained(target.parent, root)
-                file.write(data)
-                file.flush()
-                cls._fsync(file.fileno())
-            if not overwrite and os.path.lexists(target):
-                raise ProjectStoreError("refusing to overwrite an immutable candidate")
-            cls._contained(target.parent, root)
-            try:
-                os.replace(temporary_path, target)
-            except OSError as exc:
-                raise ProjectStoreError(f"could not replace storage file: {exc}") from exc
-            cls._fsync_directory(target.parent)
-        finally:
-            if temporary_path.exists():
-                temporary_path.unlink()
-
-    @classmethod
-    def _remove_new_artifact(cls, root: Path, path: Path) -> None:
-        cls._contained(path.parent, root)
-        try:
-            if os.path.lexists(path):
-                path.unlink()
-                cls._fsync_directory(path.parent)
-        except OSError as exc:
-            raise ProjectStoreError(f"could not roll back artifact: {exc}") from exc
+        return relative.parts
 
     @staticmethod
     def _fsync(descriptor: int) -> None:
@@ -405,19 +690,6 @@ class ProjectStore:
         except OSError as exc:
             if exc.errno not in _UNSUPPORTED_FSYNC_ERRNOS:
                 raise ProjectStoreError(f"could not fsync storage: {exc}") from exc
-
-    @classmethod
-    def _fsync_directory(cls, directory: Path) -> None:
-        if not hasattr(os, "O_DIRECTORY"):
-            return
-        try:
-            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-        except OSError as exc:
-            raise ProjectStoreError(f"could not open storage directory for fsync: {exc}") from exc
-        try:
-            cls._fsync(descriptor)
-        finally:
-            os.close(descriptor)
 
     @staticmethod
     def _extension_for(media_type: str) -> str:

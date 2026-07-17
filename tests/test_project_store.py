@@ -3,7 +3,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import tempfile
 from uuid import uuid4
 
 import pytest
@@ -62,16 +61,19 @@ def test_save_atomically_replaces_project_json_without_temp_residue(store, tmp_p
     replacements = []
     real_replace = os.replace
 
-    def record_replace(source, destination):
-        replacements.append((Path(source), Path(destination)))
-        return real_replace(source, destination)
+    def record_replace(source, destination, *args, **kwargs):
+        replacements.append((source, destination, kwargs))
+        return real_replace(source, destination, *args, **kwargs)
 
     monkeypatch.setattr("ai_sprite_studio.project_store.os.replace", record_replace)
     project.name = "Renamed ranger"
     store.save(project)
 
     assert store.load(project.id).name == "Renamed ranger"
-    assert any(destination == project_path for _, destination in replacements)
+    assert any(
+        destination == "project.json" and kwargs["dst_dir_fd"] >= 0
+        for _, destination, kwargs in replacements
+    )
     assert not list(project_path.parent.glob(".project.json.*"))
 
 
@@ -83,9 +85,9 @@ def test_atomic_save_fsyncs_temp_then_parent_after_replace(store, monkeypatch):
     def record_fsync(_descriptor):
         events.append("fsync")
 
-    def record_replace(source, destination):
+    def record_replace(source, destination, *args, **kwargs):
         events.append("replace")
-        return real_replace(source, destination)
+        return real_replace(source, destination, *args, **kwargs)
 
     monkeypatch.setattr("ai_sprite_studio.project_store.os.fsync", record_fsync)
     monkeypatch.setattr("ai_sprite_studio.project_store.os.replace", record_replace)
@@ -102,15 +104,17 @@ def test_create_fsyncs_projects_root_after_publishing_staged_directory(tmp_path,
     def record_fsync(_descriptor):
         events.append("fsync")
 
-    def record_replace(source, destination):
-        events.append(("replace", Path(destination)))
-        return real_replace(source, destination)
+    def record_replace(source, destination, *args, **kwargs):
+        events.append(("replace", destination, kwargs))
+        return real_replace(source, destination, *args, **kwargs)
 
     monkeypatch.setattr("ai_sprite_studio.project_store.os.fsync", record_fsync)
     monkeypatch.setattr("ai_sprite_studio.project_store.os.replace", record_replace)
     project = ProjectStore(tmp_path).create(ProjectConfig(name="Durable ranger"))
 
-    assert events[-2:] == [("replace", tmp_path / "projects" / str(project.id)), "fsync"]
+    assert events[-2][0:2] == ("replace", str(project.id))
+    assert events[-2][2]["dst_dir_fd"] >= 0
+    assert events[-1] == "fsync"
 
 
 def test_atomic_save_tolerates_explicitly_unsupported_fsync_errors(store, monkeypatch):
@@ -140,6 +144,97 @@ def test_atomic_save_propagates_supported_fsync_failures(store, monkeypatch):
         store.save(project)
 
     assert store.load(project.id).name == "Test ranger"
+
+
+def test_put_artifact_keeps_its_file_when_manifest_fsync_fails_after_publish(
+    store, monkeypatch
+):
+    project = _project(store)
+    artifact_id = uuid4()
+    calls = 0
+    real_fsync = os.fsync
+
+    def fail_manifest_directory_fsync(descriptor):
+        nonlocal calls
+        calls += 1
+        if calls == 4:
+            raise OSError(errno.EIO, "manifest directory sync failed")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr("ai_sprite_studio.project_store.uuid4", lambda: artifact_id)
+    monkeypatch.setattr(
+        "ai_sprite_studio.project_store.os.fsync", fail_manifest_directory_fsync
+    )
+
+    with pytest.raises(ProjectStoreError, match="fsync"):
+        _artifact(store, project.id)
+
+    loaded = store.load(project.id)
+    assert [artifact.id for artifact in loaded.artifacts] == [artifact_id]
+    assert store.get_artifact(project.id, artifact_id).read_bytes() == b"pixel bytes"
+
+
+def test_load_keeps_the_original_project_when_projects_is_swapped_before_read(
+    store, tmp_path, monkeypatch
+):
+    project = _project(store)
+    projects = tmp_path / "projects"
+    original = projects / str(project.id) / "project.json"
+    outside = tmp_path / "outside"
+    outside_project = outside / str(project.id)
+    outside_project.mkdir(parents=True)
+    attacker = json.loads(original.read_text())
+    attacker["name"] = "Attacker ranger"
+    (outside_project / "project.json").write_text(json.dumps(attacker))
+    real_open = os.open
+    swapped = False
+
+    def swap_before_read(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and path == "project.json":
+            projects.rename(tmp_path / "projects-real")
+            projects.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr("ai_sprite_studio.project_store.os.open", swap_before_read)
+
+    assert store.load(project.id).name == "Test ranger"
+    assert swapped
+
+
+def test_save_uses_the_pinned_project_directory_after_a_projects_swap(
+    store, tmp_path, monkeypatch
+):
+    project = _project(store)
+    projects = tmp_path / "projects"
+    outside = tmp_path / "outside"
+    outside_project = outside / str(project.id)
+    outside_project.mkdir(parents=True)
+    attacker = json.loads((projects / str(project.id) / "project.json").read_text())
+    attacker["name"] = "Attacker ranger"
+    (outside_project / "project.json").write_text(json.dumps(attacker))
+    real_replace = os.replace
+    swapped = False
+
+    def swap_before_replace(source, destination, *args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            projects.rename(tmp_path / "projects-real")
+            projects.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr("ai_sprite_studio.project_store.os.replace", swap_before_replace)
+    project.name = "Trusted ranger"
+
+    store.save(project)
+
+    persisted = json.loads(
+        (tmp_path / "projects-real" / str(project.id) / "project.json").read_text()
+    )
+    assert persisted["name"] == "Trusted ranger"
+    assert json.loads((outside_project / "project.json").read_text())["name"] == "Attacker ranger"
 
 
 def test_projects_root_rejects_a_workspace_escaping_symlink(tmp_path):
@@ -213,10 +308,10 @@ def test_put_artifact_rolls_back_when_manifest_publish_fails(store, tmp_path, mo
     candidate_root = tmp_path / "projects" / str(project.id) / "candidates"
     real_replace = os.replace
 
-    def fail_manifest_replace(source, destination):
+    def fail_manifest_replace(source, destination, *args, **kwargs):
         if Path(destination).name == "project.json":
             raise OSError(errno.EIO, "manifest failure")
-        return real_replace(source, destination)
+        return real_replace(source, destination, *args, **kwargs)
 
     monkeypatch.setattr("ai_sprite_studio.project_store.os.replace", fail_manifest_replace)
 
@@ -230,22 +325,46 @@ def test_put_artifact_rolls_back_when_manifest_publish_fails(store, tmp_path, mo
 def test_put_artifact_rolls_back_if_candidate_directory_sync_fails(store, tmp_path, monkeypatch):
     project = _project(store)
     candidate_root = tmp_path / "projects" / str(project.id) / "candidates"
-    real_fsync_directory = ProjectStore._fsync_directory
+    real_fsync_directory = ProjectStore._fsync_directory_fd
     calls = 0
 
-    def fail_once(_cls, directory):
+    def fail_once(_cls, descriptor):
         nonlocal calls
         calls += 1
         if calls == 1:
             raise ProjectStoreError("candidate directory sync failed")
-        return real_fsync_directory(directory)
+        return real_fsync_directory(descriptor)
 
-    monkeypatch.setattr(ProjectStore, "_fsync_directory", classmethod(fail_once))
+    monkeypatch.setattr(ProjectStore, "_fsync_directory_fd", classmethod(fail_once))
 
     with pytest.raises(ProjectStoreError, match="directory sync"):
         _artifact(store, project.id)
 
     assert not [path for path in candidate_root.rglob("*") if path.is_file()]
+    assert store.load(project.id).artifacts == []
+
+
+def test_put_artifact_never_overwrites_a_target_created_during_immutable_publish(
+    store, tmp_path, monkeypatch
+):
+    project = _project(store)
+    artifact_id = uuid4()
+    target = (
+        tmp_path / "projects" / str(project.id) / "candidates" / "base" / str(artifact_id) / "raw.png"
+    )
+    real_link = os.link
+
+    def create_target_then_link(source, destination, *args, **kwargs):
+        target.write_bytes(b"attacker bytes")
+        return real_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr("ai_sprite_studio.project_store.uuid4", lambda: artifact_id)
+    monkeypatch.setattr("ai_sprite_studio.project_store.os.link", create_target_then_link)
+
+    with pytest.raises(ProjectStoreError):
+        _artifact(store, project.id)
+
+    assert target.read_bytes() == b"attacker bytes"
     assert store.load(project.id).artifacts == []
 
 
@@ -271,33 +390,26 @@ def test_put_artifact_revalidates_a_parent_swapped_to_an_escaping_symlink(
     project = _project(store)
     outside = tmp_path / "outside"
     outside.mkdir()
-    real_mkstemp = tempfile.mkstemp
+    candidates = tmp_path / "projects" / str(project.id) / "candidates"
+    moved = candidates.with_name("candidates-moved")
+    real_open = os.open
     swapped = False
-    fsyncs = []
 
-    def swap_parent(*args, **kwargs):
+    def swap_parent(path, flags, mode=0o777, *, dir_fd=None):
         nonlocal swapped
-        directory = Path(kwargs["dir"])
-        if not swapped:
-            moved = directory.with_name(f"{directory.name}-moved")
-            directory.rename(moved)
-            directory.symlink_to(outside, target_is_directory=True)
+        if not swapped and path == "base":
+            candidates.rename(moved)
+            candidates.symlink_to(outside, target_is_directory=True)
             swapped = True
-        return real_mkstemp(*args, **kwargs)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
 
-    monkeypatch.setattr("ai_sprite_studio.project_store.tempfile.mkstemp", swap_parent)
-    monkeypatch.setattr(
-        ProjectStore,
-        "_fsync",
-        classmethod(lambda _cls, _descriptor: fsyncs.append(_descriptor)),
-    )
+    monkeypatch.setattr("ai_sprite_studio.project_store.os.open", swap_parent)
 
-    with pytest.raises(ProjectStoreError, match="outside"):
-        _artifact(store, project.id)
+    artifact = _artifact(store, project.id)
 
-    assert fsyncs == []
+    assert swapped
     assert not list(outside.iterdir())
-    assert store.load(project.id).artifacts == []
+    assert (moved / "base" / str(artifact.id) / "raw.png").read_bytes() == b"pixel bytes"
 
 
 def test_live_hash_rejects_an_artifact_swapped_to_a_symlink_after_lookup(
@@ -307,18 +419,24 @@ def test_live_hash_rejects_an_artifact_swapped_to_a_symlink_after_lookup(
     artifact = _artifact(store, project.id)
     outside = tmp_path / "outside.png"
     outside.write_bytes(b"pixel bytes")
-    real_artifact_path = ProjectStore._artifact_path
+    path = tmp_path / "projects" / str(project.id) / artifact.relative_path
+    real_open = os.open
+    swapped = False
 
-    def swap_artifact(_cls, root, current):
-        path = real_artifact_path(root, current)
-        path.unlink()
-        path.symlink_to(outside)
-        return path
+    def swap_artifact(name, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and name == path.name:
+            path.unlink()
+            path.symlink_to(outside)
+            swapped = True
+        return real_open(name, flags, mode, dir_fd=dir_fd)
 
-    monkeypatch.setattr(ProjectStore, "_artifact_path", classmethod(swap_artifact))
+    monkeypatch.setattr("ai_sprite_studio.project_store.os.open", swap_artifact)
 
-    with pytest.raises(ProjectStoreError, match="artifact"):
+    with pytest.raises(ProjectStoreError, match="outside"):
         store.approve(project.id, "base", [artifact.id])
+
+    assert swapped
 
 
 @pytest.mark.parametrize("stage", ["../outside", "C:outside"])
