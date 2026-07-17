@@ -19,6 +19,9 @@ dependencies = [
     "uvicorn",
 ]
 
+[project.scripts]
+ai-sprite-studio = "ai_sprite_studio.cli:main"
+
 [dependency-groups]
 build = [
     "setuptools==80.9.0",

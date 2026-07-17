@@ -19,12 +19,19 @@ import os
 from pathlib import Path, PurePosixPath
 import secrets
 import stat
-from typing import Iterable, Iterator
+from typing import Any, Iterable, Iterator
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
-from .contracts import Approval, ApprovalGate, ArtifactRef, ArtifactVariant, ProjectConfig
+from .contracts import (
+    Approval,
+    ApprovalGate,
+    ArtifactRef,
+    ArtifactVariant,
+    JobRecord,
+    ProjectConfig,
+)
 
 
 _UNSUPPORTED_FSYNC_ERRNOS = {errno.EINVAL, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}
@@ -169,6 +176,87 @@ class ProjectStore:
             if updated is not None:
                 self._write_project_at(project_fd, updated)
             return ordered
+
+    def list_projects(self) -> list[ProjectConfig]:
+        try:
+            with self._projects_fd(create=False) as projects_fd:
+                projects: list[ProjectConfig] = []
+                for name in os.listdir(projects_fd):
+                    try:
+                        project_id = UUID(name)
+                    except ValueError:
+                        continue
+                    with self._opened_directory_at(
+                        projects_fd, name, label="project"
+                    ) as project_fd:
+                        projects.append(self._load_at(project_fd, project_id))
+        except FileNotFoundError:
+            return []
+        except ProjectStoreError as exc:
+            if str(exc) == "workspace projects directory is missing":
+                return []
+            raise
+        return sorted(projects, key=lambda project: str(project.id))
+
+    def save_job(self, job: JobRecord) -> JobRecord:
+        try:
+            job = JobRecord.model_validate(job.model_dump(mode="python"))
+        except (AttributeError, ValidationError) as exc:
+            raise ProjectStoreError("invalid job") from exc
+        with self._project_fd(job.project_id) as project_fd:
+            self._load_at(project_fd, job.project_id)
+            with self._opened_directory_at(project_fd, "jobs", label="jobs") as jobs_fd:
+                self._atomic_write_at(jobs_fd, f"{job.id}.json", self._job_json(job), overwrite=True)
+        return job
+
+    def load_job(self, project_id: UUID | str, job_id: UUID | str) -> JobRecord:
+        project_id = self._uuid(project_id, "project ID")
+        job_id = self._uuid(job_id, "job ID")
+        with self._project_fd(project_id) as project_fd:
+            with self._opened_directory_at(project_fd, "jobs", label="jobs") as jobs_fd:
+                return self._load_job_at(jobs_fd, project_id, job_id)
+
+    def list_jobs(self, project_id: UUID | str) -> list[JobRecord]:
+        project_id = self._uuid(project_id, "project ID")
+        with self._project_fd(project_id) as project_fd:
+            with self._opened_directory_at(project_fd, "jobs", label="jobs") as jobs_fd:
+                jobs: list[JobRecord] = []
+                for name in os.listdir(jobs_fd):
+                    if not name.endswith(".json"):
+                        continue
+                    try:
+                        job_id = UUID(name.removesuffix(".json"))
+                    except ValueError:
+                        continue
+                    jobs.append(self._load_job_at(jobs_fd, project_id, job_id))
+        return sorted(jobs, key=lambda job: str(job.id))
+
+    def append_job_event(
+        self, project_id: UUID | str, event: str, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        project_id = self._uuid(project_id, "project ID")
+        if not isinstance(event, str) or not event.strip() or "\n" in event:
+            raise ProjectStoreError("invalid job event")
+        if not isinstance(data, dict):
+            raise ProjectStoreError("invalid job event")
+        with self._project_fd(project_id) as project_fd:
+            events = self._job_events_at(project_fd)
+            record = {"id": len(events) + 1, "event": event, "data": data}
+            try:
+                encoded = json.dumps(
+                    record, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False
+                ).encode("utf-8") + b"\n"
+            except (TypeError, ValueError) as exc:
+                raise ProjectStoreError("invalid job event") from exc
+            self._append_file_at(project_fd, "events.ndjson", encoded)
+        return record
+
+    def job_events(self, project_id: UUID | str, *, after_id: int = 0) -> list[dict[str, Any]]:
+        project_id = self._uuid(project_id, "project ID")
+        if not isinstance(after_id, int) or isinstance(after_id, bool) or after_id < 0:
+            raise ProjectStoreError("invalid event ID")
+        with self._project_fd(project_id) as project_fd:
+            return [event for event in self._job_events_at(project_fd) if event["id"] > after_id]
 
     # POSIX descriptor-relative implementation ---------------------------------
 
@@ -331,6 +419,67 @@ class ProjectStore:
         if project.id != project_id:
             raise ProjectStoreError("project ID does not match its directory")
         return project
+
+    @classmethod
+    def _load_job_at(cls, jobs_fd: int, project_id: UUID, job_id: UUID) -> JobRecord:
+        try:
+            raw = json.loads(cls._read_file_at(jobs_fd, f"{job_id}.json"))
+        except (ProjectStoreError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProjectStoreError("malformed job JSON") from exc
+        try:
+            job = JobRecord.model_validate(raw)
+        except ValidationError as exc:
+            raise ProjectStoreError("invalid job JSON") from exc
+        if job.id != job_id or job.project_id != project_id:
+            raise ProjectStoreError("job does not match its stored project")
+        return job
+
+    @classmethod
+    def _job_events_at(cls, project_fd: int) -> list[dict[str, Any]]:
+        try:
+            raw = cls._read_file_at(project_fd, "events.ndjson")
+        except ProjectStoreError as exc:
+            raise ProjectStoreError("malformed job events") from exc
+        if not raw:
+            return []
+        events: list[dict[str, Any]] = []
+        for expected_id, line in enumerate(raw.splitlines(), start=1):
+            try:
+                event = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ProjectStoreError("malformed job events") from exc
+            if (
+                not isinstance(event, dict)
+                or event.get("id") != expected_id
+                or isinstance(event.get("id"), bool)
+                or not isinstance(event.get("event"), str)
+                or not event["event"].strip()
+                or not isinstance(event.get("data"), dict)
+            ):
+                raise ProjectStoreError("malformed job events")
+            events.append(event)
+        return events
+
+    @classmethod
+    def _append_file_at(cls, parent_fd: int, name: str, data: bytes) -> None:
+        try:
+            descriptor = os.open(name, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            raise ProjectStoreError("could not append job event") from exc
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ProjectStoreError("could not append job event")
+            remaining = memoryview(data)
+            while remaining:
+                written = os.write(descriptor, remaining)
+                if written <= 0:
+                    raise ProjectStoreError("could not append job event")
+                remaining = remaining[written:]
+            cls._fsync(descriptor)
+        except OSError as exc:
+            raise ProjectStoreError("could not append job event") from exc
+        finally:
+            os.close(descriptor)
 
     @classmethod
     def _temporary_name(cls, target_name: str) -> str:
@@ -745,6 +894,18 @@ class ProjectStore:
         return (
             json.dumps(
                 project.model_dump(mode="json"),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            + b"\n"
+        )
+
+    @staticmethod
+    def _job_json(job: JobRecord) -> bytes:
+        return (
+            json.dumps(
+                job.model_dump(mode="json"),
                 ensure_ascii=False,
                 separators=(",", ":"),
                 sort_keys=True,
