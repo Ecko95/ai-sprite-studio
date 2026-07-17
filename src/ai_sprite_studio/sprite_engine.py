@@ -244,15 +244,7 @@ class SpriteEngine:
             run_dir / "sprite-request.json",
             json.dumps(prepared_request, ensure_ascii=False, indent=2) + "\n",
         )
-        raw_path = self._run_file(run_dir, raw_rel(prepared_request, _UPLOAD_STATE), required=False)
-        try:
-            raw_path.parent.mkdir(parents=True, exist_ok=True)
-            with raw_path.open("xb") as raw_file:
-                raw_file.write(source_data)
-        except FileExistsError as exc:
-            raise SpriteEngineError("sprite raw source already exists") from exc
-        except OSError as exc:
-            raise SpriteEngineError("sprite raw source could not be written") from exc
+        self._bind_raw_source(run_dir, prepared_request, source_data, replace=False)
 
         request_artifact = self._put_artifact(
             project.id,
@@ -286,19 +278,20 @@ class SpriteEngine:
         run_dir, state = self._prepared_state(project.id)
         source_id = self._state_uuid(state, "input_artifact_id")
         request_id = self._state_uuid(state, "request_artifact_id")
-        if segmentation == "components":
-            source = self._input_artifact(project.id, source_id)
-            try:
-                source_data = self.store.read_artifact_bytes(project.id, source.id)
-            except ProjectStoreError as exc:
-                raise SpriteEngineError("invalid upload artifact") from exc
-            width, height, _ = self._validated_upload(
-                source_data,
-                media_type=source.media_type,
-                filename=f"source{self._source_suffix(source.media_type)}",
+        source = self._input_artifact(project.id, source_id)
+        try:
+            source_data = self.store.read_artifact_bytes(project.id, source.id)
+        except ProjectStoreError as exc:
+            raise SpriteEngineError("invalid upload artifact") from exc
+        width, height, _ = self._validated_upload(
+            source_data,
+            media_type=source.media_type,
+            filename=f"source{self._source_suffix(source.media_type)}",
+        )
+        if segmentation == "components" and width * height > MAX_COMPONENT_INPUT_PIXELS:
+            raise SpriteEngineError(
+                "sprite component input is too complex; choose projection explicitly"
             )
-            if width * height > MAX_COMPONENT_INPUT_PIXELS:
-                raise SpriteEngineError("sprite component input is too complex; choose projection explicitly")
         self._write_state(
             run_dir,
             {"input_artifact_id": str(source_id), "request_artifact_id": str(request_id)},
@@ -307,6 +300,9 @@ class SpriteEngine:
             (run_dir / "curation.json").unlink(missing_ok=True)
         except OSError as exc:
             raise SpriteEngineError("sprite curation state could not be reset") from exc
+        # Re-bind the verified immutable source so extraction never trusts a
+        # raw file that was mutated on disk after prepare wrote it.
+        self._bind_raw_source(run_dir, self._request(run_dir), source_data, replace=True)
         result = self._invoke_writer(
             "extract",
             run_dir,
@@ -698,6 +694,49 @@ class SpriteEngine:
                 return sorted(suffixes)[0]
         raise SpriteEngineError("invalid upload artifact")
 
+    def _bind_raw_source(
+        self, run_dir: Path, request: dict[str, Any], source_data: bytes, *, replace: bool
+    ) -> Path:
+        """Write the verified immutable source into its engine-owned raw slot."""
+
+        raw_path = self._run_file(run_dir, raw_rel(request, _UPLOAD_STATE), required=False)
+        try:
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            if replace:
+                # Drop any existing regular file or symlink first, then create
+                # exclusively so a raced replacement is rejected, not followed.
+                raw_path.unlink(missing_ok=True)
+            with raw_path.open("xb") as raw_file:
+                raw_file.write(source_data)
+        except FileExistsError as exc:
+            raise SpriteEngineError("sprite raw source already exists") from exc
+        except OSError as exc:
+            raise SpriteEngineError("sprite raw source could not be written") from exc
+        return raw_path
+
+    def _artifact_index(self, project_id: UUID) -> dict[UUID, ArtifactRef]:
+        return {artifact.id: artifact for artifact in self.store.load(project_id).artifacts}
+
+    @staticmethod
+    def _require_artifact_role(
+        artifacts: dict[UUID, ArtifactRef],
+        artifact_id: UUID,
+        *,
+        kind: str,
+        variant: str,
+        dependencies: tuple[UUID, ...],
+        failure: str,
+    ) -> None:
+        artifact = artifacts.get(artifact_id)
+        if (
+            artifact is None
+            or artifact.stale
+            or artifact.kind != kind
+            or artifact.variant != variant
+            or tuple(artifact.dependencies) != dependencies
+        ):
+            raise SpriteEngineError(failure)
+
     def _input_artifact(self, project_id: UUID, artifact_id: UUID | str) -> ArtifactRef:
         try:
             artifact_uuid = artifact_id if isinstance(artifact_id, UUID) else UUID(str(artifact_id))
@@ -705,7 +744,13 @@ class SpriteEngine:
             raise SpriteEngineError("invalid upload artifact") from exc
         project = self.store.load(project_id)
         artifact = next((item for item in project.artifacts if item.id == artifact_uuid), None)
-        if artifact is None or artifact.stale or artifact.kind != "input" or artifact.variant != "raw":
+        if (
+            artifact is None
+            or artifact.stale
+            or artifact.kind != "input"
+            or artifact.variant != "raw"
+            or artifact.dependencies
+        ):
             raise SpriteEngineError("invalid upload artifact")
         return artifact
 
@@ -721,6 +766,14 @@ class SpriteEngine:
             raise SpriteEngineError("sprite curation provenance is unavailable")
         artifact_id = self._state_uuid(state, "curation_artifact_id")
         try:
+            self._require_artifact_role(
+                self._artifact_index(project_id),
+                artifact_id,
+                kind="sprite_curation",
+                variant="raw",
+                dependencies=self._state_uuids(state, "pixel_artifact_ids"),
+                failure="sprite curation provenance is unavailable",
+            )
             if path.read_bytes() != self.store.read_artifact_bytes(project_id, artifact_id):
                 raise SpriteEngineError("sprite curation provenance is unavailable")
         except SpriteEngineError:
@@ -790,6 +843,14 @@ class SpriteEngine:
     ) -> UUID:
         try:
             artifact_id = self._state_uuid(state, "request_artifact_id")
+            self._require_artifact_role(
+                self._artifact_index(project_id),
+                artifact_id,
+                kind="sprite_request",
+                variant="raw",
+                dependencies=(self._state_uuid(state, "input_artifact_id"),),
+                failure="sprite request provenance is unavailable",
+            )
             if (run_dir / "sprite-request.json").read_bytes() != self.store.read_artifact_bytes(
                 project_id, artifact_id
             ):
@@ -808,6 +869,20 @@ class SpriteEngine:
         self._current_request_dependency(project_id, run_dir, state)
         try:
             pixel_ids = self._state_uuids(state, "pixel_artifact_ids")
+            lineage = (
+                self._state_uuid(state, "input_artifact_id"),
+                self._state_uuid(state, "request_artifact_id"),
+            )
+            artifacts = self._artifact_index(project_id)
+            for artifact_id in pixel_ids:
+                self._require_artifact_role(
+                    artifacts,
+                    artifact_id,
+                    kind="sprite_frame",
+                    variant="pixel",
+                    dependencies=lineage,
+                    failure="sprite frame provenance is unavailable",
+                )
             expected_files = self._relative_files(state.get("pixel_files"), "sprite frame provenance")
             manifest = self._json_file(
                 self._run_file(run_dir, "frames/frames-manifest.json"), "sprite extraction report"

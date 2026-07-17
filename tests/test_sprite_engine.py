@@ -1278,3 +1278,95 @@ def test_compose_lock_release_failure_invalidates_live_frame_drift(tmp_path, mon
         "input_artifact_id": before["input_artifact_id"],
         "request_artifact_id": before["request_artifact_id"],
     }
+
+
+def test_extract_rebinds_the_immutable_source_over_a_mutated_raw_file(tmp_path):
+    from sprite_gen.layout import raw_rel
+
+    store, project, engine, source, _, _ = _prepared_engine(tmp_path, frames=2)
+    run_dir = store.run_dir(project.id)
+    request = json.loads((run_dir / "sprite-request.json").read_text())
+    raw_path = run_dir / raw_rel(request, "upload")
+
+    assert raw_path.read_bytes() == source
+    raw_path.write_bytes(_strip_png(frames=1))  # tamper the on-disk raw source
+
+    engine.extract(project.id)
+
+    # Extraction re-binds the verified upload, so the mutated bytes are discarded.
+    assert raw_path.read_bytes() == source
+
+
+def test_extract_rejects_a_request_pointer_with_the_wrong_artifact_role(tmp_path):
+    store, project, engine, _, uploaded, _ = _prepared_engine(tmp_path, frames=2)
+    run_dir = store.run_dir(project.id)
+    impostor = store.put_artifact(
+        project.id,
+        (run_dir / "sprite-request.json").read_bytes(),
+        kind="sprite_report",  # same bytes, wrong role
+        media_type="application/json",
+        variant="raw",
+        stage="sprite_upload",
+        dependencies=[uploaded.id],
+    )
+    state = json.loads((run_dir / "sprite-engine.json").read_text())
+    state["request_artifact_id"] = str(impostor.id)
+    (run_dir / "sprite-engine.json").write_text(json.dumps(state, sort_keys=True) + "\n")
+
+    with pytest.raises(SpriteEngineError, match="request provenance"):
+        engine.extract(project.id)
+
+
+def test_load_curation_rejects_a_pixel_pointer_with_broken_lineage(tmp_path):
+    store, project, engine, _, _, _ = _prepared_engine(tmp_path, frames=2)
+    extracted = engine.extract(project.id)
+    run_dir = store.run_dir(project.id)
+    impostor = store.put_artifact(
+        project.id,
+        store.read_artifact_bytes(project.id, extracted.pixel_artifact_ids[0]),
+        kind="sprite_frame",
+        variant="pixel",
+        media_type="image/png",
+        stage="sprite_upload",
+        dependencies=[],  # same bytes and role, missing source/request lineage
+        width=256,
+        height=256,
+    )
+    state = json.loads((run_dir / "sprite-engine.json").read_text())
+    state["pixel_artifact_ids"][0] = str(impostor.id)
+    (run_dir / "sprite-engine.json").write_text(json.dumps(state, sort_keys=True) + "\n")
+
+    with pytest.raises(SpriteEngineError, match="frame provenance"):
+        engine.load_curation(project.id)
+
+
+def test_compose_rejects_a_curation_pointer_with_broken_lineage(tmp_path):
+    store, project, engine, _, _, _ = _prepared_engine(tmp_path, frames=2)
+    engine.extract(project.id)
+    revision = engine.load_curation(project.id).run_revision
+    engine.stamp_curation(
+        project.id,
+        {
+            "version": 1,
+            "kind": "sprite-gen-curation",
+            "runRevision": revision,
+            "states": {"upload": {"selected": [1, 0]}},
+        },
+    )
+    run_dir = store.run_dir(project.id)
+    sidecar_bytes = (run_dir / "curation.json").read_bytes()
+    impostor = store.put_artifact(
+        project.id,
+        sidecar_bytes,
+        kind="sprite_curation",
+        variant="raw",
+        media_type="application/json",
+        stage="sprite_upload",
+        dependencies=[],  # same bytes and role, missing pixel-frame lineage
+    )
+    state = json.loads((run_dir / "sprite-engine.json").read_text())
+    state["curation_artifact_id"] = str(impostor.id)
+    (run_dir / "sprite-engine.json").write_text(json.dumps(state, sort_keys=True) + "\n")
+
+    with pytest.raises(SpriteEngineError, match="curation provenance"):
+        engine.compose(project.id)
