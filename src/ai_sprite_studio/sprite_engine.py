@@ -24,7 +24,7 @@ from sprite_gen import prepare as sprite_prepare
 from sprite_gen import preview as sprite_preview
 from sprite_gen.curation import frame_variant, load_curation, run_revision, stamp_curation, state_plan
 from sprite_gen.layout import raw_rel
-from sprite_gen.runio import atomic_write_text, read_guard
+from sprite_gen.runio import atomic_write_text, read_guard, release_run_dir_lock
 
 from .contracts import ArtifactRef
 from .project_store import ProjectStore, ProjectStoreError
@@ -57,11 +57,12 @@ _ENGINE_MUTATION_LOCK = RLock()
 def _engine_mutation_guard(run_dir: Path):
     """Serialize this engine's run-state changes across app processes."""
 
-    if fcntl is None:
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if fcntl is None or no_follow is None:
         raise RuntimeError("sprite engine mutation lock is unavailable")
     path = run_dir.parent / f".{run_dir.name}.sprite-engine.lock"
     try:
-        descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | no_follow, 0o600)
     except OSError as exc:
         raise RuntimeError("sprite engine mutation lock is unavailable") from exc
     try:
@@ -265,16 +266,32 @@ class SpriteEngine:
             raise SpriteEngineError("unsupported sprite segmentation")
         project = self.store.load(project_id)
         run_dir, state = self._prepared_state(project.id)
+        source_id = self._state_uuid(state, "input_artifact_id")
+        request_id = self._state_uuid(state, "request_artifact_id")
         if segmentation == "components":
-            source = self._input_artifact(project.id, self._state_uuid(state, "input_artifact_id"))
-            if (
-                source.width is None
-                or source.height is None
-                or source.width * source.height > MAX_COMPONENT_INPUT_PIXELS
-            ):
+            source = self._input_artifact(project.id, source_id)
+            try:
+                source_data = self.store.read_artifact_bytes(project.id, source.id)
+            except ProjectStoreError as exc:
+                raise SpriteEngineError("invalid upload artifact") from exc
+            width, height, _ = self._validated_upload(
+                source_data,
+                media_type=source.media_type,
+                filename=f"source{self._source_suffix(source.media_type)}",
+            )
+            if width * height > MAX_COMPONENT_INPUT_PIXELS:
                 raise SpriteEngineError("sprite component input is too complex; choose projection explicitly")
-        result = self._invoke(
+        self._write_state(
+            run_dir,
+            {"input_artifact_id": str(source_id), "request_artifact_id": str(request_id)},
+        )
+        try:
+            (run_dir / "curation.json").unlink(missing_ok=True)
+        except OSError as exc:
+            raise SpriteEngineError("sprite curation state could not be reset") from exc
+        result = self._invoke_writer(
             "extract",
+            run_dir,
             sprite_extract.run,
             run_dir=run_dir,
             states=_UPLOAD_STATE,
@@ -298,8 +315,6 @@ class SpriteEngine:
         if not files or len(files) != len(plain_files):
             raise SpriteEngineError("sprite extraction did not preserve frame twins")
 
-        source_id = self._state_uuid(state, "input_artifact_id")
-        request_id = self._state_uuid(state, "request_artifact_id")
         validated_frames: list[tuple[Path, Path]] = []
         shared_palette: set[tuple[int, int, int]] = set()
         for plain_file, pixel_file in zip(plain_files, files, strict=True):
@@ -365,10 +380,6 @@ class SpriteEngine:
             variant="raw",
             dependencies=(*plain_ids, *pixel_ids),
         )
-        try:
-            (run_dir / "curation.json").unlink(missing_ok=True)
-        except OSError as exc:
-            raise SpriteEngineError("sprite curation state could not be reset") from exc
         self._write_state(
             run_dir,
             {
@@ -376,6 +387,7 @@ class SpriteEngine:
                 "request_artifact_id": str(request_id),
                 "plain_artifact_ids": [str(item) for item in plain_ids],
                 "pixel_artifact_ids": [str(item) for item in pixel_ids],
+                "pixel_files": list(files),
                 "preview_artifact_ids": [str(item) for item in preview_ids],
                 "extract_report_artifact_id": str(report_artifact.id),
             },
@@ -471,11 +483,12 @@ class SpriteEngine:
 
         project = self.store.load(project_id)
         run_dir, state = self._extracted_state(project.id)
+        pixel_ids = self._current_pixel_dependencies(project.id, run_dir, state)
         curation_ids = self._current_curation_dependencies(project.id, run_dir, state)
-        result = self._invoke("compose", compose_atlas.run, run_dir=run_dir)
+        result = self._invoke_writer("compose", run_dir, compose_atlas.run, run_dir=run_dir)
         self._require_success("compose", result)
 
-        pixel_ids = self._state_uuids(state, "pixel_artifact_ids")
+        self._current_pixel_dependencies(project.id, run_dir, state)
         if self._current_curation_dependencies(project.id, run_dir, state) != curation_ids:
             raise SpriteEngineError("sprite curation provenance changed during compose")
         atlas_path = self._run_file(run_dir, "sprite-sheet-alpha.png")
@@ -528,13 +541,14 @@ class SpriteEngine:
 
         project = self.store.load(project_id)
         run_dir, state = self._extracted_state(project.id)
+        dependencies = self._current_pixel_dependencies(project.id, run_dir, state)
         report = self._invoke("inspect", sprite_inspect.inspect_run, run_dir, states=_UPLOAD_STATE)
         if not isinstance(report, dict):
             raise SpriteEngineError("sprite inspection failed")
+        self._current_pixel_dependencies(project.id, run_dir, state)
         summary = self._redact(report, run_dir)
         report_path = run_dir / "sprite-inspect.report.json"
         atomic_write_text(report_path, json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
-        dependencies = self._state_uuids(state, "pixel_artifact_ids")
         artifact = self._put_artifact(
             project.id,
             report_path.read_bytes(),
@@ -654,6 +668,41 @@ class SpriteEngine:
         except (OSError, ProjectStoreError) as exc:
             raise SpriteEngineError("sprite curation provenance is unavailable") from exc
         return (artifact_id,)
+
+    def _current_pixel_dependencies(
+        self, project_id: UUID, run_dir: Path, state: dict[str, Any]
+    ) -> tuple[UUID, ...]:
+        pixel_ids = self._state_uuids(state, "pixel_artifact_ids")
+        try:
+            expected_files = self._relative_files(state.get("pixel_files"), "sprite frame provenance")
+            manifest = self._json_file(
+                self._run_file(run_dir, "frames/frames-manifest.json"), "sprite extraction report"
+            )
+            rows = [
+                row
+                for row in manifest.get("rows", [])
+                if isinstance(row, dict) and row.get("state") == _UPLOAD_STATE
+            ]
+            if len(rows) != 1:
+                raise SpriteEngineError("sprite frame provenance is unavailable")
+            files = self._relative_files(rows[0].get("files"), "sprite frame provenance")
+            if (
+                not pixel_ids
+                or files != expected_files
+                or len(files) != len(pixel_ids)
+                or len(files) != len(set(files))
+            ):
+                raise SpriteEngineError("sprite frame provenance is unavailable")
+            for relative_path, artifact_id in zip(files, pixel_ids, strict=True):
+                if self._run_file(run_dir, relative_path).read_bytes() != self.store.read_artifact_bytes(
+                    project_id, artifact_id
+                ):
+                    raise SpriteEngineError("sprite frame provenance is unavailable")
+        except SpriteEngineError:
+            raise
+        except (OSError, ProjectStoreError) as exc:
+            raise SpriteEngineError("sprite frame provenance is unavailable") from exc
+        return pixel_ids
 
     @staticmethod
     def _curation_index(value: object, frames: int) -> int:
@@ -960,6 +1009,15 @@ class SpriteEngine:
             raise SpriteEngineError(f"sprite {operation} failed") from exc
 
     @staticmethod
+    def _invoke_writer(
+        operation: str, run_dir: Path, runner: Callable[..., Any], /, *args: Any, **kwargs: Any
+    ) -> Any:
+        try:
+            return SpriteEngine._invoke(operation, runner, *args, **kwargs)
+        finally:
+            release_run_dir_lock(run_dir)
+
+    @staticmethod
     def _require_success(operation: str, result: object) -> None:
         if result != 0:
             raise SpriteEngineError(f"sprite {operation} failed")
@@ -977,9 +1035,9 @@ class SpriteEngine:
     def _redact(value: Any, run_dir: Path) -> Any:
         if isinstance(value, dict):
             return {
-                str(key): SpriteEngine._redact(item, run_dir)
+                str(SpriteEngine._redact(str(key), run_dir)): SpriteEngine._redact(item, run_dir)
                 for key, item in value.items()
-                if key != "run_dir"
+                if str(key) != "run_dir"
             }
         if isinstance(value, list):
             return [SpriteEngine._redact(item, run_dir) for item in value]

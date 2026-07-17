@@ -69,6 +69,13 @@ def _acquire_engine_mutation_lock(run_dir, attempting, entered):
         entered.set()
 
 
+def _compose_then_hold(workspace, project_id, finished, release):
+    SpriteEngine(ProjectStore(workspace)).compose(project_id)
+    finished.set()
+    if not release.wait(timeout=10):
+        raise RuntimeError("test did not release the first compose process")
+
+
 def _prepared_engine(tmp_path, *, frames=2, fused=False, detached=False):
     store, project, engine = _project_engine(tmp_path)
     source = _strip_png(frames=frames, fused=fused, detached=detached)
@@ -102,6 +109,22 @@ def _assert_canonical(frame):
             ]
             if any(pixel[3] for pixel in block):
                 assert len(set(block)) == 1
+
+
+def _change_live_pixel_frame(path):
+    with Image.open(path) as opened:
+        frame = opened.convert("RGBA")
+    for y in range(0, 256, 2):
+        for x in range(0, 256, 2):
+            color = frame.getpixel((x, y))
+            if color[3]:
+                changed = ((color[0] + 1) % 256, color[1], color[2], 255)
+                for dy in range(2):
+                    for dx in range(2):
+                        frame.putpixel((x + dx, y + dy), changed)
+                frame.save(path)
+                return
+    raise AssertionError("fixture did not contain a pixel frame block")
 
 
 def test_extract_rejects_a_palette_spread_across_pixel_frames(tmp_path, monkeypatch):
@@ -660,6 +683,39 @@ def test_components_reject_large_input_before_upstream_but_projection_can_run(tm
     assert calls == ["projection"]
 
 
+def test_components_gate_rechecks_verified_bytes_not_forged_metadata(tmp_path, monkeypatch):
+    store, project, engine = _project_engine(tmp_path)
+    encoded = io.BytesIO()
+    Image.new("RGBA", (513, 512), MAGENTA).save(encoded, format="PNG")
+    forged = store.put_artifact(
+        project.id,
+        encoded.getvalue(),
+        kind="input",
+        media_type="image/png",
+        variant="raw",
+        width=1,
+        height=1,
+    )
+    engine.prepare(project.id, forged.id)
+
+    import ai_sprite_studio.sprite_engine as sprite_engine
+
+    calls = []
+
+    def upstream_probe(*args, **kwargs):
+        calls.append(kwargs["segmentation"])
+        raise SystemExit("unsafe upstream diagnostic")
+
+    monkeypatch.setattr(sprite_engine.sprite_extract, "run", upstream_probe)
+
+    with pytest.raises(SpriteEngineError, match="component input is too complex"):
+        engine.extract(project.id)
+    assert not calls
+    with pytest.raises(SpriteEngineError, match="sprite extract failed"):
+        engine.extract(project.id, segmentation="projection")
+    assert calls == ["projection"]
+
+
 def test_detached_accessory_is_not_used_as_a_slot_fallback(tmp_path):
     store, project, engine, _, _, _ = _prepared_engine(tmp_path, frames=1, detached=True)
 
@@ -736,3 +792,158 @@ def test_engine_stays_local_and_never_reprepares_a_live_run(tmp_path):
     assert "openai" not in source
     assert "higgsfield" not in source
     assert "allow_slot_fallback=true" not in source
+
+
+def test_failed_reextract_clears_all_current_derived_state(tmp_path, monkeypatch):
+    store, project, engine, _, _, _ = _prepared_engine(tmp_path, frames=2)
+    engine.extract(project.id)
+    revision = engine.load_curation(project.id).run_revision
+    engine.stamp_curation(
+        project.id,
+        {
+            "version": 1,
+            "kind": "sprite-gen-curation",
+            "runRevision": revision,
+            "states": {"upload": {"selected": [1, 0]}},
+        },
+    )
+    engine.compose(project.id)
+    engine.inspect(project.id)
+
+    original_put = SpriteEngine._put_artifact
+
+    def fail_frame_import(self, project_id, data, **kwargs):
+        if kwargs["kind"] == "sprite_frame":
+            raise SpriteEngineError("test frame import failure")
+        return original_put(self, project_id, data, **kwargs)
+
+    monkeypatch.setattr(SpriteEngine, "_put_artifact", fail_frame_import)
+
+    with pytest.raises(SpriteEngineError, match="test frame import failure"):
+        engine.extract(project.id)
+
+    state = json.loads((store.run_dir(project.id) / "sprite-engine.json").read_text())
+    assert set(state) == {"input_artifact_id", "request_artifact_id"}
+    with pytest.raises(SpriteEngineError, match="has not been extracted"):
+        engine.compose(project.id)
+    with pytest.raises(SpriteEngineError, match="has not been extracted"):
+        engine.inspect(project.id)
+
+
+def test_compose_rejects_live_frame_changed_after_upstream_runs(tmp_path, monkeypatch):
+    store, project, engine, _, _, _ = _prepared_engine(tmp_path, frames=1)
+    engine.extract(project.id)
+
+    import ai_sprite_studio.sprite_engine as sprite_engine
+
+    upstream_compose = sprite_engine.compose_atlas.run
+
+    def compose_then_change_frame(*args, **kwargs):
+        result = upstream_compose(*args, **kwargs)
+        manifest = json.loads((kwargs["run_dir"] / "frames/frames-manifest.json").read_text())
+        row = next(item for item in manifest["rows"] if item["state"] == "upload")
+        _change_live_pixel_frame(kwargs["run_dir"] / row["files"][0])
+        return result
+
+    monkeypatch.setattr(sprite_engine.compose_atlas, "run", compose_then_change_frame)
+
+    with pytest.raises(SpriteEngineError, match="frame provenance"):
+        engine.compose(project.id)
+
+    assert not [artifact for artifact in store.load(project.id).artifacts if artifact.kind == "sprite_atlas"]
+
+
+def test_inspect_rejects_live_frames_that_no_longer_match_artifacts(tmp_path):
+    store, project, engine, _, _, _ = _prepared_engine(tmp_path, frames=1)
+    engine.extract(project.id)
+    manifest = json.loads((store.run_dir(project.id) / "frames/frames-manifest.json").read_text())
+    row = next(item for item in manifest["rows"] if item["state"] == "upload")
+    _change_live_pixel_frame(store.run_dir(project.id) / row["files"][0])
+
+    with pytest.raises(SpriteEngineError, match="frame provenance"):
+        engine.inspect(project.id)
+
+    state = json.loads((store.run_dir(project.id) / "sprite-engine.json").read_text())
+    assert "inspect_report_artifact_id" not in state
+
+
+def test_compose_releases_its_upstream_lock_after_an_error(tmp_path, monkeypatch):
+    _, project, engine, _, _, _ = _prepared_engine(tmp_path, frames=1)
+    engine.extract(project.id)
+
+    import ai_sprite_studio.sprite_engine as sprite_engine
+    from sprite_gen.runio import acquire_run_dir_lock
+
+    def acquire_then_fail(*args, **kwargs):
+        acquire_run_dir_lock(kwargs["run_dir"], "test")
+        raise SystemExit("unsafe upstream diagnostic")
+
+    monkeypatch.setattr(sprite_engine.compose_atlas, "run", acquire_then_fail)
+
+    with pytest.raises(SpriteEngineError, match="sprite compose failed"):
+        engine.compose(project.id)
+
+    assert not (engine.store.run_dir(project.id) / ".sprite-gen.lock").exists()
+
+
+def test_separate_process_compose_releases_the_upstream_lock(tmp_path):
+    import multiprocessing
+
+    _, project, engine, _, _, _ = _prepared_engine(tmp_path, frames=1)
+    engine.extract(project.id)
+    context = multiprocessing.get_context("spawn")
+    first_finished = context.Event()
+    release_first = context.Event()
+    first = context.Process(
+        target=_compose_then_hold,
+        args=(str(tmp_path), str(project.id), first_finished, release_first),
+    )
+    second_finished = context.Event()
+    second_release = context.Event()
+    second = context.Process(
+        target=_compose_then_hold,
+        args=(str(tmp_path), str(project.id), second_finished, second_release),
+    )
+
+    first.start()
+    try:
+        assert first_finished.wait(timeout=10)
+        second.start()
+        assert second_finished.wait(timeout=10)
+        second_release.set()
+        second.join(timeout=10)
+        assert second.exitcode == 0
+    finally:
+        release_first.set()
+        first.join(timeout=10)
+    assert first.exitcode == 0
+
+
+def test_diagnostics_redact_path_like_mapping_keys(tmp_path):
+    run_dir = tmp_path / "project" / "run"
+    diagnostics = SpriteEngine._redact(
+        {"/tmp/private/sprite.png": {str(run_dir): "safe"}}, run_dir
+    )
+
+    rendered = json.dumps(diagnostics)
+    assert "/tmp/private/sprite.png" not in rendered
+    assert str(run_dir) not in rendered
+    assert diagnostics == {"<path>": {"<run>": "safe"}}
+
+
+def test_engine_lock_rejects_a_symlink_sidecar(tmp_path):
+    store, project, engine = _project_engine(tmp_path)
+    uploaded = engine.ingest_upload(
+        project.id, _strip_png(frames=1), media_type="image/png", filename="ranger.png"
+    )
+    run_dir = store.run_dir(project.id)
+    sidecar = run_dir.parent / f".{run_dir.name}.sprite-engine.lock"
+    target = tmp_path / "outside-lock"
+    sidecar.symlink_to(target)
+
+    with pytest.raises(SpriteEngineError, match="sprite engine operation failed"):
+        engine.prepare(project.id, uploaded.id)
+
+    assert sidecar.is_symlink()
+    assert not target.exists()
+    assert not list(run_dir.iterdir())
