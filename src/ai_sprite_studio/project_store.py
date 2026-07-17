@@ -153,6 +153,33 @@ class ProjectStore:
             self._read_artifact_at(project_fd, artifact, digest=False)
             return self.projects.joinpath(str(project_id), *self._relative_parts(artifact.relative_path))
 
+    def run_dir(self, project_id: UUID | str) -> Path:
+        """Return the validated upstream-owned run directory for one project.
+
+        ``sprite-gen`` requires a real path, so this has the same post-return
+        pathname race as :meth:`get_artifact`; callers must only use fixed,
+        engine-owned names inside it.
+        """
+
+        project_id = self._uuid(project_id, "project ID")
+        with self._project_fd(project_id) as project_fd:
+            self._load_at(project_fd, project_id)
+            with self._opened_directory_at(project_fd, "run", label="run"):
+                pass
+        return self.projects / str(project_id) / "run"
+
+    def read_artifact_bytes(self, project_id: UUID | str, artifact_id: UUID | str) -> bytes:
+        """Read one stored artifact through its pinned descriptor and verify its digest."""
+
+        project_id = self._uuid(project_id, "project ID")
+        artifact_id = self._uuid(artifact_id, "artifact ID")
+        with self._project_fd(project_id) as project_fd:
+            project = self._load_at(project_fd, project_id)
+            artifact = next((item for item in project.artifacts if item.id == artifact_id), None)
+            if artifact is None:
+                raise ProjectStoreError("unknown artifact")
+            return self._read_artifact_bytes_at(project_fd, artifact)
+
     def verify_artifact(self, project_id: UUID | str, artifact_id: UUID | str) -> ArtifactRef:
         """Rehash one stored artifact through its pinned project descriptor."""
 
@@ -945,6 +972,13 @@ class ProjectStore:
         if result != artifact.sha256:
             raise ProjectStoreError("artifact hash does not match its record")
         return result
+
+    def _read_artifact_bytes_at(self, project_fd: int, artifact: ArtifactRef) -> bytes:
+        with self._parent_fd_at(project_fd, artifact.relative_path, create=False) as (parent_fd, name):
+            data = self._read_file_at(parent_fd, name)
+        if hashlib.sha256(data).hexdigest() != artifact.sha256:
+            raise ProjectStoreError("artifact hash does not match its record")
+        return data
 
     def _approval_hashes_at(
         self, project_fd: int, approval: Approval, artifacts: dict[UUID, ArtifactRef]
