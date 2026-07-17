@@ -167,17 +167,15 @@ def test_atomic_save_propagates_supported_fsync_failures(store, monkeypatch):
 
 
 def test_put_artifact_keeps_its_file_when_manifest_fsync_fails_after_publish(
-    store, monkeypatch
+    store, tmp_path, monkeypatch
 ):
     project = _project(store)
     artifact_id = uuid4()
-    calls = 0
+    project_root = tmp_path / "projects" / str(project.id)
     real_fsync = os.fsync
 
     def fail_manifest_directory_fsync(descriptor):
-        nonlocal calls
-        calls += 1
-        if calls == 4:
+        if Path(os.readlink(f"/proc/self/fd/{descriptor}")) == project_root:
             raise OSError(errno.EIO, "manifest directory sync failed")
         return real_fsync(descriptor)
 
@@ -361,6 +359,28 @@ def test_put_artifact_rolls_back_if_candidate_directory_sync_fails(store, tmp_pa
         _artifact(store, project.id)
 
     assert not [path for path in candidate_root.rglob("*") if path.is_file()]
+    assert store.load(project.id).artifacts == []
+
+
+def test_put_artifact_does_not_commit_a_manifest_when_a_created_parent_sync_fails(
+    store, tmp_path, monkeypatch
+):
+    project = _project(store)
+    candidates = tmp_path / "projects" / str(project.id) / "candidates"
+    real_fsync_directory = ProjectStore._fsync_directory_fd
+
+    def fail_created_parent_sync(_cls, descriptor):
+        if Path(os.readlink(f"/proc/self/fd/{descriptor}")) == candidates:
+            raise ProjectStoreError("created candidate parent sync failed")
+        return real_fsync_directory(descriptor)
+
+    monkeypatch.setattr(
+        ProjectStore, "_fsync_directory_fd", classmethod(fail_created_parent_sync)
+    )
+
+    with pytest.raises(ProjectStoreError, match="created candidate parent sync"):
+        _artifact(store, project.id)
+
     assert store.load(project.id).artifacts == []
 
 

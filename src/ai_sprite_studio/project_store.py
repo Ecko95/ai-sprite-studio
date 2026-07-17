@@ -251,6 +251,9 @@ class ProjectStore:
             pass
         except OSError as exc:
             raise ProjectStoreError(f"could not create {label} directory: {exc}") from exc
+        else:
+            # Persist this directory entry before opening a child beneath it.
+            cls._fsync_directory_fd(parent_fd)
         try:
             return os.open(name, cls._directory_flags(), dir_fd=parent_fd)
         except OSError as exc:
