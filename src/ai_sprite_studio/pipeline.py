@@ -8,7 +8,7 @@ from uuid import UUID
 
 from .contracts import Approval, ArtifactRef, ArtifactVariant, ProjectConfig, StateSpec
 from .prompts import STAGES
-from .project_store import ProjectStore, ProjectStoreError
+from .project_store import ProjectStore, ProjectStoreConflictError, ProjectStoreError
 
 
 class PipelineError(ProjectStoreError):
@@ -63,6 +63,7 @@ _GATE_PREDECESSORS = {
     "motion": ("frames",),
     "export": ("motion",),
 }
+_GATE_APPROVAL_ATTEMPTS = 3
 
 
 def put_stage_artifact(
@@ -168,7 +169,6 @@ def approve_gate(
 ) -> Approval:
     """Approve live stage outputs only after their predecessor gate is live."""
 
-    project = store.load(project_id)
     if gate not in _GATE_KINDS:
         raise PipelineError("unknown approval gate")
     if not isinstance(note, str):
@@ -176,25 +176,44 @@ def approve_gate(
     selected_ids = _input_ids(artifact_ids)
     if not selected_ids:
         raise PipelineError("approval requires at least one artifact")
-    _validate_gate_artifacts(project, gate, selected_ids)
-    for predecessor in _GATE_PREDECESSORS[gate]:
-        approval = _stored_approval(project, predecessor)
-        if approval is None:
-            raise PipelineError(f"{predecessor} approval is required")
-        _validate_stored_approval(store, project, predecessor, approval)
-    previous = _stored_approval(project, gate)
-    if previous is not None:
-        _validate_approval_hashes(project, previous, require_live=False)
-        if previous.artifact_ids == selected_ids:
-            return store.approve(project.id, gate, previous.artifact_ids, note=note)
-        return store.replace_approval_and_invalidate_dependants(
-            project.id,
-            gate,
-            selected_ids,
-            previous_artifact_ids=previous.artifact_ids,
-            note=note,
-        )
-    return store.approve(project.id, gate, selected_ids, note=note)
+    for _ in range(_GATE_APPROVAL_ATTEMPTS):
+        project, revision = store.load_with_manifest_revision(project_id)
+        try:
+            _validate_gate_artifacts(project, gate, selected_ids)
+            for predecessor in _GATE_PREDECESSORS[gate]:
+                approval = _stored_approval(project, predecessor)
+                if approval is None:
+                    raise PipelineError(f"{predecessor} approval is required")
+                _validate_stored_approval(store, project, predecessor, approval)
+            previous = _stored_approval(project, gate)
+            if previous is not None:
+                _validate_approval_hashes(project, previous, require_live=False)
+                if previous.artifact_ids == selected_ids:
+                    return store.approve(
+                        project.id,
+                        gate,
+                        previous.artifact_ids,
+                        note=note,
+                        expected_manifest_revision=revision,
+                    )
+                return store.replace_approval_and_invalidate_dependants(
+                    project.id,
+                    gate,
+                    selected_ids,
+                    previous_artifact_ids=previous.artifact_ids,
+                    note=note,
+                    expected_manifest_revision=revision,
+                )
+            return store.approve(
+                project.id,
+                gate,
+                selected_ids,
+                note=note,
+                expected_manifest_revision=revision,
+            )
+        except ProjectStoreConflictError:
+            continue
+    raise PipelineError("approval changed concurrently; try again")
 
 
 def preflight_requests(

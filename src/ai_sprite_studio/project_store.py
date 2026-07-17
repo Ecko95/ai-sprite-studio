@@ -52,6 +52,10 @@ class ProjectStoreError(ValueError):
     """A project file or requested storage operation is unsafe or invalid."""
 
 
+class ProjectStoreConflictError(ProjectStoreError):
+    """A guarded mutation observed a newer project manifest."""
+
+
 class _WriteFailure(ProjectStoreError):
     """A write failure annotated with whether its destination was published."""
 
@@ -78,6 +82,15 @@ class ProjectStore:
         project_id = self._uuid(project_id, "project ID")
         with self._project_fd(project_id) as project_fd:
             return self._load_at(project_fd, project_id)
+
+    def load_with_manifest_revision(
+        self, project_id: UUID | str
+    ) -> tuple[ProjectConfig, str]:
+        """Load a validated project and digest its exact manifest bytes."""
+
+        project_id = self._uuid(project_id, "project ID")
+        with self._project_fd(project_id) as project_fd:
+            return self._load_with_manifest_revision_at(project_fd, project_id)
 
     def save(self, project: ProjectConfig) -> ProjectConfig:
         project = self._validate_project(project)
@@ -160,11 +173,15 @@ class ProjectStore:
         artifact_ids: Iterable[UUID | str] | None = None,
         *,
         note: str = "",
+        expected_manifest_revision: str | None = None,
     ) -> Approval:
         project_id = self._uuid(project_id, "project ID")
         with self._project_fd(project_id) as project_fd:
             with self._project_mutation_lock(project_fd):
-                project = self._load_at(project_fd, project_id)
+                project, revision = self._load_with_manifest_revision_at(
+                    project_fd, project_id
+                )
+                self._require_manifest_revision(expected_manifest_revision, revision)
                 approval = self._approval_for(gate, artifact_ids, note)
                 artifacts = {artifact.id: artifact for artifact in project.artifacts}
                 current_hashes = self._approval_hashes_at(project_fd, approval, artifacts)
@@ -191,6 +208,7 @@ class ProjectStore:
         *,
         previous_artifact_ids: Iterable[UUID | str],
         note: str = "",
+        expected_manifest_revision: str | None = None,
     ) -> Approval:
         """Replace one approval and stale dependants of removed roots in one manifest write."""
 
@@ -202,7 +220,10 @@ class ProjectStore:
             raise ProjectStoreError("approval note must be text")
         with self._project_fd(project_id) as project_fd:
             with self._project_mutation_lock(project_fd):
-                project = self._load_at(project_fd, project_id)
+                project, revision = self._load_with_manifest_revision_at(
+                    project_fd, project_id
+                )
+                self._require_manifest_revision(expected_manifest_revision, revision)
                 previous = next((item for item in project.approvals if item.gate == gate), None)
                 if previous is None:
                     raise ProjectStoreError("approval to replace does not exist")
@@ -576,6 +597,11 @@ class ProjectStore:
         return b"".join(chunks)
 
     def _load_at(self, project_fd: int, project_id: UUID) -> ProjectConfig:
+        return self._load_with_manifest_revision_at(project_fd, project_id)[0]
+
+    def _load_with_manifest_revision_at(
+        self, project_fd: int, project_id: UUID
+    ) -> tuple[ProjectConfig, str]:
         try:
             raw_bytes = self._read_file_at(project_fd, "project.json")
             raw = json.loads(raw_bytes)
@@ -589,7 +615,12 @@ class ProjectStore:
             raise ProjectStoreError(f"invalid project JSON: {exc}") from exc
         if project.id != project_id:
             raise ProjectStoreError("project ID does not match its directory")
-        return project
+        return project, hashlib.sha256(raw_bytes).hexdigest()
+
+    @staticmethod
+    def _require_manifest_revision(expected: str | None, current: str) -> None:
+        if expected is not None and expected != current:
+            raise ProjectStoreConflictError("project manifest changed before approval")
 
     @classmethod
     def _load_job_at(cls, jobs_fd: int, project_id: UUID, job_id: UUID) -> JobRecord:

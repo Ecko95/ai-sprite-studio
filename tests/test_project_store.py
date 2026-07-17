@@ -10,7 +10,11 @@ from uuid import uuid4
 import pytest
 
 from ai_sprite_studio.contracts import Approval, ProjectConfig
-from ai_sprite_studio.project_store import ProjectStore, ProjectStoreError
+from ai_sprite_studio.project_store import (
+    ProjectStore,
+    ProjectStoreConflictError,
+    ProjectStoreError,
+)
 
 
 @pytest.fixture
@@ -613,6 +617,33 @@ def test_replace_approval_invalidates_every_dropped_prior_root(store):
 
     artifacts = {artifact.id: artifact for artifact in store.load(project.id).artifacts}
     assert artifacts[dropped_child.id].stale
+
+
+def test_approval_publications_reject_a_stale_manifest_revision(store):
+    project = _project(store)
+    approved = _artifact(store, project.id, stage="approved")
+    replacement = _artifact(store, project.id, stage="replacement")
+    store.approve(project.id, "base", [approved.id])
+    _, revision = store.load_with_manifest_revision(project.id)
+    _artifact(store, project.id, stage="unrelated")
+
+    with pytest.raises(ProjectStoreConflictError, match="manifest changed"):
+        store.approve(
+            project.id,
+            "base",
+            [approved.id],
+            expected_manifest_revision=revision,
+        )
+    with pytest.raises(ProjectStoreConflictError, match="manifest changed"):
+        store.replace_approval_and_invalidate_dependants(
+            project.id,
+            "base",
+            [replacement.id],
+            previous_artifact_ids=[approved.id],
+            expected_manifest_revision=revision,
+        )
+
+    assert store.load(project.id).approvals[0].artifact_ids == [approved.id]
 
 
 def test_invalidate_dependants_marks_only_transitive_children_stale_and_keeps_files(store):

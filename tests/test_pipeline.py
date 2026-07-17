@@ -1,4 +1,5 @@
 import sys
+from threading import Event, Thread
 from types import ModuleType
 from uuid import uuid4
 
@@ -445,7 +446,9 @@ def test_gate_rejects_a_predecessor_with_mismatched_stored_hash(monkeypatch, tmp
     current = store.load(project.id)
     approval = current.approvals[0].model_copy(update={"artifact_hashes": ["0" * 64]})
     malformed = current.model_copy(update={"approvals": [approval]})
-    monkeypatch.setattr(store, "load", lambda _: malformed)
+    monkeypatch.setattr(
+        store, "load_with_manifest_revision", lambda _: (malformed, "0" * 64)
+    )
 
     with pytest.raises(PipelineError, match="hash does not match"):
         approve_gate(store, project.id, "directions", [directions.id])
@@ -677,3 +680,56 @@ def test_gate_rehashes_predecessor_artifact_bytes_before_approval(tmp_path) -> N
 
     with pytest.raises(PipelineError, match="base approval.*hash does not match"):
         approve_gate(store, project.id, "directions", [directions.id])
+
+
+def test_gate_retries_a_manifest_conflict_before_publishing_policy(
+    monkeypatch, tmp_path
+) -> None:
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig())
+    source = store.put_artifact(
+        project.id,
+        b"identity",
+        kind="input",
+        media_type="image/png",
+        variant="raw",
+    )
+    snapped = _base_snap(store, project.id, source.id, b"base")
+    directions = _directions(store, project.id, snapped, b"directions")
+    approve_gate(store, project.id, "base", [snapped.id])
+    publish_ready = Event()
+    resume_publish = Event()
+    errors: list[BaseException] = []
+    real_approve = store.approve
+    paused = False
+
+    def pause_directions_publish(project_id, gate, artifact_ids=None, **kwargs):
+        nonlocal paused
+        if gate == "directions" and not paused:
+            paused = True
+            publish_ready.set()
+            if not resume_publish.wait(5):
+                raise RuntimeError("directions publication release timed out")
+        return real_approve(project_id, gate, artifact_ids, **kwargs)
+
+    def approve_directions() -> None:
+        try:
+            approve_gate(store, project.id, "directions", [directions.id])
+        except BaseException as exc:  # pragma: no cover - assertion reports it below
+            errors.append(exc)
+
+    monkeypatch.setattr(store, "approve", pause_directions_publish)
+    thread = Thread(target=approve_directions)
+    thread.start()
+    try:
+        assert publish_ready.wait(5)
+        store.approve(project.id, "base", [source.id])
+    finally:
+        resume_publish.set()
+        thread.join(5)
+
+    assert not thread.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], PipelineError)
+    assert str(errors[0]) == "base approval has the wrong stage"
+    assert [approval.gate for approval in store.load(project.id).approvals] == ["base"]
