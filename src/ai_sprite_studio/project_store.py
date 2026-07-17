@@ -13,6 +13,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -189,6 +190,11 @@ class ProjectStore:
                     with self._opened_directory_at(
                         projects_fd, name, label="project"
                     ) as project_fd:
+                        # A crash can leave the UUID directory behind before
+                        # its manifest is first published.  Once a manifest
+                        # exists, keep surfacing every malformed project.
+                        if not self._entry_exists_at(project_fd, "project.json"):
+                            continue
                         projects.append(self._load_at(project_fd, project_id))
         except FileNotFoundError:
             return []
@@ -197,6 +203,36 @@ class ProjectStore:
                 return []
             raise
         return sorted(projects, key=lambda project: str(project.id))
+
+    def acquire_runner_lock(self) -> int:
+        with self._workspace_fd(create=True) as workspace_fd:
+            try:
+                descriptor = os.open(
+                    ".runner.lock",
+                    os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=workspace_fd,
+                )
+            except OSError as exc:
+                raise ProjectStoreError("could not lock workspace") from exc
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    raise ProjectStoreError("could not lock workspace")
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                os.close(descriptor)
+                raise ProjectStoreError("workspace is already in use") from exc
+            except BaseException:
+                os.close(descriptor)
+                raise
+            return descriptor
+
+    @staticmethod
+    def release_runner_lock(descriptor: int) -> None:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
     def save_job(self, job: JobRecord) -> JobRecord:
         try:
@@ -243,12 +279,23 @@ class ProjectStore:
             events = self._job_events_at(project_fd)
             record = {"id": len(events) + 1, "event": event, "data": data}
             try:
-                encoded = json.dumps(
-                    record, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False
-                ).encode("utf-8") + b"\n"
+                # ponytail: This rewrites O(n²) total event bytes over a job's
+                # lifetime; use a database or segmented log only if event
+                # volume makes that added machinery worthwhile.
+                encoded = b"".join(
+                    json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                        allow_nan=False,
+                    ).encode("utf-8")
+                    + b"\n"
+                    for item in [*events, record]
+                )
             except (TypeError, ValueError) as exc:
                 raise ProjectStoreError("invalid job event") from exc
-            self._append_file_at(project_fd, "events.ndjson", encoded)
+            self._atomic_write_at(project_fd, "events.ndjson", encoded, overwrite=True)
         return record
 
     def job_events(self, project_id: UUID | str, *, after_id: int = 0) -> list[dict[str, Any]]:
@@ -459,27 +506,6 @@ class ProjectStore:
                 raise ProjectStoreError("malformed job events")
             events.append(event)
         return events
-
-    @classmethod
-    def _append_file_at(cls, parent_fd: int, name: str, data: bytes) -> None:
-        try:
-            descriptor = os.open(name, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, dir_fd=parent_fd)
-        except OSError as exc:
-            raise ProjectStoreError("could not append job event") from exc
-        try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                raise ProjectStoreError("could not append job event")
-            remaining = memoryview(data)
-            while remaining:
-                written = os.write(descriptor, remaining)
-                if written <= 0:
-                    raise ProjectStoreError("could not append job event")
-                remaining = remaining[written:]
-            cls._fsync(descriptor)
-        except OSError as exc:
-            raise ProjectStoreError("could not append job event") from exc
-        finally:
-            os.close(descriptor)
 
     @classmethod
     def _temporary_name(cls, target_name: str) -> str:

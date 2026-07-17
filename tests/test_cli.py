@@ -1,4 +1,12 @@
+import http.client
+import os
 import re
+import select
+import signal
+import subprocess
+import sys
+import time
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -31,3 +39,58 @@ def test_serve_reserves_a_loopback_port_and_opens_its_exact_url(tmp_path, monkey
 def test_cli_does_not_expose_a_non_loopback_host_option():
     with pytest.raises(SystemExit):
         cli.main(["serve", "--host", "0.0.0.0"])
+
+
+def test_real_cli_port_zero_prints_a_serving_local_url(tmp_path):
+    environment = os.environ | {"BROWSER": "/bin/true"}
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from ai_sprite_studio.cli import main; raise SystemExit(main())",
+            "serve",
+            "--workspace",
+            str(tmp_path),
+            "--port",
+            "0",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+    try:
+        assert process.stdout is not None
+        ready, _, _ = select.select([process.stdout], [], [], 5)
+        assert ready, "CLI did not print its local URL"
+        url = process.stdout.readline().strip()
+        assert re.fullmatch(r"http://127\.0\.0\.1:[1-9][0-9]*/", url)
+
+        parsed = urlsplit(url)
+        deadline = time.monotonic() + 5
+        while True:
+            connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=1)
+            try:
+                connection.request("GET", "/")
+                response = connection.getresponse()
+                body = response.read().decode()
+                break
+            except (ConnectionError, OSError, http.client.HTTPException):
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+            finally:
+                connection.close()
+
+        assert response.status == 200
+        assert "AI Sprite Studio" in body
+    finally:
+        if process.poll() is None:
+            process.send_signal(signal.SIGINT)
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=5)
+
+    assert process.poll() is not None

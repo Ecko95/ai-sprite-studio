@@ -36,6 +36,13 @@ def api_error(code: str, message: str, *, status_code: int) -> JSONResponse:
     )
 
 
+def _job_id(request) -> UUID | None:
+    try:
+        return UUID(request.path_params["job_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 async def list_projects(request):
     projects = request.app.state.store.list_projects()
     return JSONResponse({"projects": [project.model_dump(mode="json") for project in projects]})
@@ -99,8 +106,11 @@ async def create_job(request):
 
 
 async def get_job(request):
+    job_id = _job_id(request)
+    if job_id is None:
+        return api_error("invalid_job_id", "The job ID is invalid", status_code=422)
     try:
-        job = await request.app.state.runner.get(request.path_params["job_id"])
+        job = await request.app.state.runner.get(job_id)
     except ProjectStoreError:
         return api_error("unknown_job", "The job was not found", status_code=404)
     return JSONResponse(job.model_dump(mode="json"))
@@ -111,9 +121,13 @@ async def job_events(request):
         after_id = int(request.headers.get("last-event-id", "0"))
         if after_id < 0:
             raise ValueError
-        job = await request.app.state.runner.get(request.path_params["job_id"])
     except ValueError:
         return api_error("invalid_event_id", "The event ID is invalid", status_code=422)
+    job_id = _job_id(request)
+    if job_id is None:
+        return api_error("invalid_job_id", "The job ID is invalid", status_code=422)
+    try:
+        job = await request.app.state.runner.get(job_id)
     except ProjectStoreError:
         return api_error("unknown_job", "The job was not found", status_code=404)
 
@@ -128,8 +142,11 @@ async def job_events(request):
 
 
 async def cancel_job(request):
+    job_id = _job_id(request)
+    if job_id is None:
+        return api_error("invalid_job_id", "The job ID is invalid", status_code=422)
     try:
-        job = await request.app.state.runner.cancel(request.path_params["job_id"])
+        job = await request.app.state.runner.cancel(job_id)
     except ProjectStoreError:
         return api_error("unknown_job", "The job was not found", status_code=404)
     return JSONResponse(job.model_dump(mode="json"))

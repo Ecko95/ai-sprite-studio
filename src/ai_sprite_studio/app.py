@@ -14,7 +14,7 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.exceptions import HTTPException
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, Response
 from starlette.routing import Route
 
 from .api import api_error, cancel_job, create_job, get_job, job_events, project_detail, projects
@@ -80,14 +80,7 @@ def _same_loopback_origin(origin: str | None, host_header: str | None) -> bool:
     return (parsed.hostname.lower(), port) == host
 
 
-def _error(code: str, message: str, *, status_code: int) -> JSONResponse:
-    return JSONResponse(
-        {"code": code, "message": message, "retryable": False, "details": {}},
-        status_code=status_code,
-    )
-
-
-def _secure(response: JSONResponse | HTMLResponse) -> JSONResponse | HTMLResponse:
+def _secure(response: Response) -> Response:
     response.headers["Content-Security-Policy"] = _CSP
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
@@ -104,7 +97,7 @@ class LocalSecurityMiddleware:
         headers = Headers(scope=scope)
         host = headers.get("host")
         if not _is_loopback_host(host):
-            await _secure(_error("invalid_host", "Local access is required", status_code=400))(
+            await _secure(api_error("invalid_host", "Local access is required", status_code=400))(
                 scope, receive, send
             )
             return
@@ -115,17 +108,17 @@ class LocalSecurityMiddleware:
             "DELETE",
         }:
             if not _same_loopback_origin(headers.get("origin"), host):
-                await _secure(_error("invalid_origin", "Same-origin local access is required", status_code=403))(
-                    scope, receive, send
-                )
+                await _secure(
+                    api_error("invalid_origin", "Same-origin local access is required", status_code=403)
+                )(scope, receive, send)
                 return
             session_id = Request(scope).cookies.get(_SESSION_COOKIE)
             expected = scope["app"].state.sessions.get(session_id or "")
             provided = headers.get("x-csrf-token")
             if not expected or not provided or not secrets.compare_digest(expected, provided):
-                await _secure(_error("csrf_failed", "A valid CSRF token is required", status_code=403))(
-                    scope, receive, send
-                )
+                await _secure(
+                    api_error("csrf_failed", "A valid CSRF token is required", status_code=403)
+                )(scope, receive, send)
                 return
 
         async def send_securely(message):
@@ -157,13 +150,19 @@ async def _root(request):
     return response
 
 
-async def _http_error(request, exc: HTTPException) -> JSONResponse:
+async def _http_error(request, exc: HTTPException) -> Response:
     codes = {404: "not_found", 405: "method_not_allowed"}
-    return api_error(codes.get(exc.status_code, "http_error"), "The request cannot be completed", status_code=exc.status_code)
+    return _secure(
+        api_error(
+            codes.get(exc.status_code, "http_error"),
+            "The request cannot be completed",
+            status_code=exc.status_code,
+        )
+    )
 
 
-async def _unexpected_error(request, _exc: Exception) -> JSONResponse:
-    return api_error("internal_error", "The request cannot be completed", status_code=500)
+async def _unexpected_error(request, _exc: Exception) -> Response:
+    return _secure(api_error("internal_error", "The request cannot be completed", status_code=500))
 
 
 def create_app(workspace: str | Path, handler: JobHandler | None = None) -> Starlette:

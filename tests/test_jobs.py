@@ -1,11 +1,14 @@
 import asyncio
+from contextlib import suppress
+import subprocess
+import sys
 from uuid import uuid4
 
 import pytest
 
 from ai_sprite_studio.contracts import JobCommand, JobRecord, ProjectConfig
 from ai_sprite_studio.jobs import JobRunner
-from ai_sprite_studio.project_store import ProjectStore
+from ai_sprite_studio.project_store import ProjectStore, ProjectStoreError
 
 
 @pytest.mark.asyncio
@@ -289,4 +292,222 @@ async def test_runner_cancels_a_queued_job_without_executing_it(tmp_path):
         assert executions == [first.id]
         assert store.load_job(project.id, second.id).status == "canceled"
     finally:
+        await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_event_stream_replays_only_its_job_and_skips_unrelated_wakes(tmp_path):
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig(name="Isolated events ranger"))
+    target = JobRecord(
+        id=uuid4(),
+        project_id=project.id,
+        command=JobCommand.RUN_QA,
+        status="running",
+        payload={},
+        input_hash="a" * 64,
+        provider_request_ids=[],
+        output_artifact_ids=[],
+        progress=0,
+        error=None,
+    )
+    other = target.model_copy(update={"id": uuid4(), "input_hash": "b" * 64})
+    store.save_job(target)
+    store.save_job(other)
+    store.append_job_event(project.id, "job", target.model_dump(mode="json"))
+    store.append_job_event(project.id, "job", other.model_dump(mode="json"))
+
+    runner = JobRunner(store)
+    stream = runner.event_stream(target.id)
+    pending = None
+    try:
+        first = await anext(stream)
+        pending = asyncio.create_task(anext(stream))
+        await asyncio.sleep(0)
+
+        assert first["data"]["id"] == str(target.id)
+        assert not pending.done()
+
+        await runner.update(target.id, progress=0.5)
+        resumed = await asyncio.wait_for(pending, timeout=1)
+        assert resumed["data"]["id"] == str(target.id)
+        assert resumed["id"] == 3
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            with suppress(asyncio.CancelledError):
+                await pending
+        await stream.aclose()
+        await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_runner_exclusively_locks_its_workspace_for_its_lifetime(tmp_path):
+    first = JobRunner(ProjectStore(tmp_path))
+    second = JobRunner(ProjectStore(tmp_path))
+    try:
+        await first.start()
+
+        with pytest.raises(ProjectStoreError, match="already in use"):
+            await second.start()
+    finally:
+        await second.aclose()
+        await first.aclose()
+
+
+@pytest.mark.asyncio
+async def test_runner_lock_rejects_a_second_process_in_the_same_workspace(tmp_path):
+    first = JobRunner(ProjectStore(tmp_path))
+    script = """
+import asyncio
+import sys
+
+from ai_sprite_studio.jobs import JobRunner
+from ai_sprite_studio.project_store import ProjectStore, ProjectStoreError
+
+
+async def main():
+    runner = JobRunner(ProjectStore(sys.argv[1]))
+    try:
+        await runner.start()
+    except ProjectStoreError:
+        return 0
+    await runner.aclose()
+    return 1
+
+
+raise SystemExit(asyncio.run(main()))
+"""
+    try:
+        await first.start()
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        assert result.returncode == 0, result.stderr
+    finally:
+        await first.aclose()
+
+
+@pytest.mark.asyncio
+async def test_runner_skips_only_pre_manifest_project_crash_residue(tmp_path):
+    store = ProjectStore(tmp_path)
+    (tmp_path / "projects" / str(uuid4())).mkdir(parents=True)
+    runner = JobRunner(store)
+    try:
+        await runner.start()
+    finally:
+        await runner.aclose()
+
+    project = store.create(ProjectConfig(name="Malformed ranger"))
+    manifest = tmp_path / "projects" / str(project.id) / "project.json"
+    manifest.write_text("{not JSON")
+    broken = JobRunner(ProjectStore(tmp_path))
+    try:
+        with pytest.raises(ProjectStoreError, match="malformed project JSON"):
+            await broken.start()
+    finally:
+        await broken.aclose()
+
+
+def test_job_events_replace_the_complete_snapshot_atomically(tmp_path, monkeypatch):
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig(name="Atomic events ranger"))
+    writes = []
+    original = ProjectStore._atomic_write_at
+
+    def record_write(cls, parent_fd, target_name, data, *, overwrite):
+        writes.append((target_name, data, overwrite))
+        return original(parent_fd, target_name, data, overwrite=overwrite)
+
+    monkeypatch.setattr(ProjectStore, "_atomic_write_at", classmethod(record_write))
+
+    store.append_job_event(project.id, "job", {"id": "first"})
+    store.append_job_event(project.id, "job", {"id": "second"})
+
+    assert [name for name, _data, _overwrite in writes] == ["events.ndjson", "events.ndjson"]
+    assert all(overwrite for _name, _data, overwrite in writes)
+    assert writes[-1][1].count(b"\n") == 2
+    assert b'"id":1' in writes[-1][1]
+    assert b'"id":2' in writes[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_runner_repairs_a_missing_terminal_event_on_start_and_before_streaming(tmp_path):
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig(name="Reconciled events ranger"))
+    job = JobRecord(
+        id=uuid4(),
+        project_id=project.id,
+        command=JobCommand.RUN_QA,
+        status="succeeded",
+        payload={},
+        input_hash="a" * 64,
+        provider_request_ids=[],
+        output_artifact_ids=[],
+        progress=1,
+        error=None,
+    )
+    store.save_job(job)
+    runner = JobRunner(store)
+    stream = None
+    try:
+        await runner.start()
+
+        assert [event["data"]["status"] for event in store.job_events(project.id)] == ["succeeded"]
+
+        failed = job.model_copy(update={"status": "failed"})
+        store.save_job(failed)
+        stream = runner.event_stream(job.id, after_id=1)
+        event = await anext(stream)
+
+        assert event["id"] == 2
+        assert event["data"]["status"] == "failed"
+    finally:
+        if stream is not None:
+            await stream.aclose()
+        await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_event_write_failure_keeps_saved_terminal_job_and_worker_alive(tmp_path, monkeypatch):
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig(name="Event failure ranger"))
+    executed = []
+
+    async def handler(job, _cancel_requested):
+        executed.append(job.id)
+
+    original_append = store.append_job_event
+    terminal_write_failed = False
+
+    def fail_first_terminal_event(project_id, event, data):
+        nonlocal terminal_write_failed
+        if data["status"] == "succeeded" and not terminal_write_failed:
+            terminal_write_failed = True
+            raise ProjectStoreError("event write failed")
+        return original_append(project_id, event, data)
+
+    monkeypatch.setattr(store, "append_job_event", fail_first_terminal_event)
+    runner = JobRunner(store, handler)
+    stream = None
+    try:
+        first = await runner.enqueue(project.id, JobCommand.RUN_QA, {"state": "first"})
+        await runner.wait_idle()
+        second = await runner.enqueue(project.id, JobCommand.GENERATE_BASE, {"state": "second"})
+        await runner.wait_idle()
+
+        assert store.load_job(project.id, first.id).status == "succeeded"
+        assert store.load_job(project.id, second.id).status == "succeeded"
+        assert executed == [first.id, second.id]
+
+        stream = runner.event_stream(first.id)
+        replayed = [event async for event in stream]
+        assert replayed[-1]["data"]["status"] == "succeeded"
+    finally:
+        if stream is not None:
+            await stream.aclose()
         await runner.aclose()

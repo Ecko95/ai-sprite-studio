@@ -25,6 +25,7 @@ class JobRunner:
         self._cancellations: dict[UUID, asyncio.Event] = {}
         self._events_changed = asyncio.Condition()
         self._worker_task: asyncio.Task[None] | None = None
+        self._runner_lock_fd: int | None = None
         self._started = False
 
     async def enqueue(
@@ -55,8 +56,7 @@ class JobRunner:
             progress=0,
             error=None,
         )
-        self.store.save_job(job)
-        await self._emit(job)
+        await self._persist(job)
         self._projects[job.id] = project.id
         self._cancellations[job.id] = asyncio.Event()
         if self._worker_task is None:
@@ -67,26 +67,33 @@ class JobRunner:
     async def start(self) -> None:
         if self._started:
             return
-        for project in self.store.list_projects():
-            for job in self.store.list_jobs(project.id):
-                self._projects[job.id] = project.id
-                self._cancellations[job.id] = asyncio.Event()
-                if job.status == "queued":
-                    await self._queue.put(job.id)
-                elif job.status in {"running", "cancel_requested"}:
-                    attention = job.model_copy(
-                        update={
-                            "status": "attention_required",
-                            "error": ApiError(
-                                code="interrupted_job",
-                                message="Job needs attention after an interrupted run",
-                            ),
-                        }
-                    )
-                    self.store.save_job(attention)
-                    await self._emit(attention)
-        self._worker_task = asyncio.create_task(self._worker())
-        self._started = True
+        self._runner_lock_fd = self.store.acquire_runner_lock()
+        try:
+            for project in self.store.list_projects():
+                for job in self.store.list_jobs(project.id):
+                    self._projects[job.id] = project.id
+                    self._cancellations[job.id] = asyncio.Event()
+                    if job.status in {"running", "cancel_requested"}:
+                        attention = job.model_copy(
+                            update={
+                                "status": "attention_required",
+                                "error": ApiError(
+                                    code="interrupted_job",
+                                    message="Job needs attention after an interrupted run",
+                                ),
+                            }
+                        )
+                        await self._persist(attention)
+                    else:
+                        await self._reconcile_event(job)
+                    if job.status == "queued":
+                        await self._queue.put(job.id)
+            self._worker_task = asyncio.create_task(self._worker())
+            self._started = True
+        except BaseException:
+            self.store.release_runner_lock(self._runner_lock_fd)
+            self._runner_lock_fd = None
+            raise
 
     async def wait_idle(self) -> None:
         await self._queue.join()
@@ -96,16 +103,12 @@ class JobRunner:
         if job.status == "queued":
             self._cancellations[job.id].set()
             canceled = job.model_copy(update={"status": "canceled"})
-            self.store.save_job(canceled)
-            await self._emit(canceled)
-            return canceled
+            return await self._persist(canceled)
         if job.status != "running":
             return job
         self._cancellations[job.id].set()
         requested = job.model_copy(update={"status": "cancel_requested"})
-        self.store.save_job(requested)
-        await self._emit(requested)
-        return requested
+        return await self._persist(requested)
 
     async def get(self, job_id: UUID | str) -> JobRecord:
         try:
@@ -129,16 +132,22 @@ class JobRunner:
         job = await self.get(job_id)
         last_id = after_id
         while True:
+            current = self.store.load_job(job.project_id, job.id)
+            await self._reconcile_event(current)
             events = self.store.job_events(job.project_id, after_id=last_id)
             for event in events:
-                yield event
                 last_id = event["id"]
+                if self._is_job_event(event, job.id):
+                    yield event
             current = self.store.load_job(job.project_id, job.id)
             if current.status in {"succeeded", "failed", "canceled", "attention_required"}:
                 return
             async with self._events_changed:
                 await self._events_changed.wait_for(
-                    lambda: bool(self.store.job_events(job.project_id, after_id=last_id))
+                    lambda: any(
+                        self._is_job_event(event, job.id)
+                        for event in self.store.job_events(job.project_id, after_id=last_id)
+                    )
                     or self.store.load_job(job.project_id, job.id).status
                     in {"succeeded", "failed", "canceled", "attention_required"}
                 )
@@ -159,20 +168,22 @@ class JobRunner:
         if output_artifact_ids is not None:
             raw["output_artifact_ids"] = output_artifact_ids
         updated = JobRecord.model_validate(raw)
-        self.store.save_job(updated)
-        await self._emit(updated)
-        return updated
+        return await self._persist(updated)
 
     async def aclose(self) -> None:
-        if self._worker_task is None:
-            return
-        self._worker_task.cancel()
         try:
-            await self._worker_task
-        except asyncio.CancelledError:
-            pass
-        self._worker_task = None
-        self._started = False
+            if self._worker_task is not None:
+                self._worker_task.cancel()
+                try:
+                    await self._worker_task
+                except asyncio.CancelledError:
+                    pass
+                self._worker_task = None
+        finally:
+            if self._runner_lock_fd is not None:
+                self.store.release_runner_lock(self._runner_lock_fd)
+                self._runner_lock_fd = None
+            self._started = False
 
     async def _worker(self) -> None:
         while True:
@@ -183,8 +194,7 @@ class JobRunner:
                 if job.status != "queued":
                     continue
                 running = job.model_copy(update={"status": "running"})
-                self.store.save_job(running)
-                await self._emit(running)
+                await self._persist(running)
                 if self.handler is None:
                     attention = running.model_copy(
                         update={
@@ -195,8 +205,7 @@ class JobRunner:
                             ),
                         }
                     )
-                    self.store.save_job(attention)
-                    await self._emit(attention)
+                    await self._persist(attention)
                     continue
                 await self.handler(running, self._cancellations[job_id])
                 current = self.store.load_job(project_id, job_id)
@@ -204,8 +213,7 @@ class JobRunner:
                     finished = current.model_copy(update={"status": "canceled"})
                 else:
                     finished = current.model_copy(update={"status": "succeeded", "progress": 1})
-                self.store.save_job(finished)
-                await self._emit(finished)
+                await self._persist(finished)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -221,15 +229,49 @@ class JobRunner:
                             ),
                         }
                 )
-                self.store.save_job(failed)
-                await self._emit(failed)
+                await self._persist(failed)
             finally:
                 self._queue.task_done()
 
+    async def _persist(self, job: JobRecord) -> JobRecord:
+        saved = self.store.save_job(job)
+        try:
+            await self._emit(saved)
+        except ProjectStoreError:
+            # State is already durable.  A later start or stream will repair
+            # the missing event rather than changing this job's outcome.
+            await self._notify_events_changed()
+        return saved
+
+    async def _reconcile_event(self, job: JobRecord) -> None:
+        expected = job.model_dump(mode="json")
+        latest = next(
+            (
+                event
+                for event in reversed(self.store.job_events(job.project_id))
+                if self._is_job_event(event, job.id)
+            ),
+            None,
+        )
+        if latest is not None and latest["data"] == expected:
+            return
+        try:
+            await self._emit(job)
+        except ProjectStoreError:
+            await self._notify_events_changed()
+
     async def _emit(self, job: JobRecord) -> None:
         self.store.append_job_event(job.project_id, "job", job.model_dump(mode="json"))
+        await self._notify_events_changed()
+
+    async def _notify_events_changed(self) -> None:
         async with self._events_changed:
             self._events_changed.notify_all()
+
+    @staticmethod
+    def _is_job_event(event: dict[str, Any], job_id: UUID) -> bool:
+        data = event.get("data")
+        return event.get("event") == "job" and isinstance(data, dict) and data.get("id") == str(job_id)
 
     @staticmethod
     def _input_hash(command: JobCommand, payload: dict[str, Any]) -> str:

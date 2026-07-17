@@ -109,6 +109,24 @@ def test_job_routes_create_read_replay_and_cancel(tmp_path):
     assert canceled.json()["status"] == "cancel_requested"
 
 
+def test_job_routes_reject_malformed_job_ids(tmp_path):
+    with TestClient(create_app(tmp_path), base_url="http://127.0.0.1") as client:
+        root = client.get("/")
+        csrf = re.search(r'<meta name="csrf-token" content="([^\"]+)">', root.text).group(1)
+        responses = (
+            client.get("/api/v1/jobs/not-a-uuid"),
+            client.get("/api/v1/jobs/not-a-uuid/events"),
+            client.post(
+                "/api/v1/jobs/not-a-uuid/cancel",
+                headers={"Origin": "http://127.0.0.1", "X-CSRF-Token": csrf},
+            ),
+        )
+
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["code"] == "invalid_job_id"
+
+
 def test_api_rejects_external_hosts_and_bad_requests_with_the_stable_error_shape(tmp_path):
     with TestClient(create_app(tmp_path), base_url="http://127.0.0.1") as client:
         root = client.get("/")
@@ -128,6 +146,26 @@ def test_api_rejects_external_hosts_and_bad_requests_with_the_stable_error_shape
     assert "access-control-allow-origin" not in external_host.headers
     assert missing.status_code == 404
     assert malformed.status_code == 422
+
+
+def test_http_and_unexpected_errors_keep_local_security_headers(tmp_path):
+    async def explode(_request):
+        raise RuntimeError("unexpected")
+
+    app = create_app(tmp_path)
+    app.add_route("/api/v1/explode", explode)
+    with TestClient(
+        app, base_url="http://127.0.0.1", raise_server_exceptions=False
+    ) as client:
+        missing = client.get("/api/v1/missing")
+        unexpected = client.get("/api/v1/explode")
+
+    for response in (missing, unexpected):
+        assert response.headers["content-security-policy"].startswith("default-src 'self'")
+        assert response.headers["x-content-type-options"] == "nosniff"
+
+    assert missing.status_code == 404
+    assert unexpected.status_code == 500
 
 
 def test_unsafe_api_requests_reject_a_different_loopback_origin(tmp_path):
