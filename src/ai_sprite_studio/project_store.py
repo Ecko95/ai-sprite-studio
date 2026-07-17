@@ -437,15 +437,18 @@ class ProjectStore:
             target_name = str(project.id)
             if self._entry_exists_at(projects_fd, target_name):
                 raise ProjectStoreError("project already exists")
-            staging_name = f".{project.id}.{secrets.token_hex(16)}"
             try:
-                os.mkdir(staging_name, 0o700, dir_fd=projects_fd)
+                # mkdir(2) is the no-replace publication point for project
+                # directories.  Python has no portable rename-no-replace API.
+                os.mkdir(target_name, 0o700, dir_fd=projects_fd)
+            except FileExistsError as exc:
+                raise ProjectStoreError("project already exists") from exc
             except OSError as exc:
                 raise ProjectStoreError(f"could not create project: {exc}") from exc
 
-            published = False
+            manifest_published = False
             try:
-                with self._opened_directory_at(projects_fd, staging_name, label="project") as staging_fd:
+                with self._opened_directory_at(projects_fd, target_name, label="project") as project_fd:
                     for directory in (
                         "inputs",
                         "candidates",
@@ -455,26 +458,24 @@ class ProjectStore:
                         "jobs",
                         "exports",
                     ):
-                        os.mkdir(directory, 0o755, dir_fd=staging_fd)
-                    self._atomic_write_at(staging_fd, "events.ndjson", b"", overwrite=False)
-                    self._atomic_write_at(
-                        staging_fd, "project.json", self._project_json(project), overwrite=False
-                    )
-                os.replace(
-                    staging_name,
-                    target_name,
-                    src_dir_fd=projects_fd,
-                    dst_dir_fd=projects_fd,
-                )
-                published = True
+                        os.mkdir(directory, 0o755, dir_fd=project_fd)
+                    self._atomic_write_at(project_fd, "events.ndjson", b"", overwrite=False)
+                    try:
+                        self._atomic_write_at(
+                            project_fd, "project.json", self._project_json(project), overwrite=False
+                        )
+                    except _WriteFailure as exc:
+                        manifest_published = exc.published
+                        raise
+                    manifest_published = True
                 self._fsync_directory_fd(projects_fd)
             except _WriteFailure as exc:
                 raise ProjectStoreError(str(exc)) from exc
             except OSError as exc:
                 raise ProjectStoreError(f"could not create project: {exc}") from exc
             finally:
-                if not published:
-                    self._remove_tree_at(projects_fd, staging_name)
+                if not manifest_published:
+                    self._remove_tree_at(projects_fd, target_name)
         return project
 
     @contextmanager

@@ -55,6 +55,33 @@ def test_create_builds_the_exact_uuid_project_layout(store, tmp_path):
     assert store.load(project.id).id == project.id
 
 
+def test_create_never_replaces_a_project_directory_that_appears_during_creation(
+    tmp_path, monkeypatch
+):
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    project = ProjectConfig(name="Racing ranger")
+    target = projects / str(project.id)
+    real_mkdir = os.mkdir
+    raced = False
+
+    def create_target_then_mkdir(path, mode=0o777, *, dir_fd=None):
+        nonlocal raced
+        if not raced:
+            real_mkdir(target, 0o755)
+            raced = True
+        return real_mkdir(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr("ai_sprite_studio.project_store.os.mkdir", create_target_then_mkdir)
+
+    with pytest.raises(ProjectStoreError, match="project already exists"):
+        ProjectStore(tmp_path).create(project)
+
+    assert raced
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+
+
 def test_save_atomically_replaces_project_json_without_temp_residue(store, tmp_path, monkeypatch):
     project = _project(store)
     project_path = tmp_path / "projects" / str(project.id) / "project.json"
@@ -97,24 +124,17 @@ def test_atomic_save_fsyncs_temp_then_parent_after_replace(store, monkeypatch):
     assert events == ["fsync", "replace", "fsync"]
 
 
-def test_create_fsyncs_projects_root_after_publishing_staged_directory(tmp_path, monkeypatch):
+def test_create_fsyncs_projects_root_after_initializing_final_directory(tmp_path, monkeypatch):
     events = []
-    real_replace = os.replace
 
-    def record_fsync(_descriptor):
-        events.append("fsync")
-
-    def record_replace(source, destination, *args, **kwargs):
-        events.append(("replace", destination, kwargs))
-        return real_replace(source, destination, *args, **kwargs)
+    def record_fsync(descriptor):
+        events.append(Path(os.readlink(f"/proc/self/fd/{descriptor}")))
 
     monkeypatch.setattr("ai_sprite_studio.project_store.os.fsync", record_fsync)
-    monkeypatch.setattr("ai_sprite_studio.project_store.os.replace", record_replace)
     project = ProjectStore(tmp_path).create(ProjectConfig(name="Durable ranger"))
 
-    assert events[-2][0:2] == ("replace", str(project.id))
-    assert events[-2][2]["dst_dir_fd"] >= 0
-    assert events[-1] == "fsync"
+    assert events[-1] == tmp_path / "projects"
+    assert tmp_path / "projects" / str(project.id) in events
 
 
 def test_atomic_save_tolerates_explicitly_unsupported_fsync_errors(store, monkeypatch):
