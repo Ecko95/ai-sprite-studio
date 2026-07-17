@@ -1,0 +1,989 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* 깨끗한 라이트(화이트 베이스) 테마 — 중립 그레이 + 블루 액센트 1개 (2026-07-02) */
+:root {
+  color-scheme: light;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --panel-2: #f1f3f6;
+  --line: #e4e7ec;
+  --text: #1f2430;
+  --muted: #6b7280;
+  --accent: #2563eb;
+  --accent-dim: #dbe5fb;
+  --reject: #eceef2;
+  --danger: #dc2626;
+  --checker-a: #e9ebef;
+  --checker-b: #f4f5f7;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 18px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.title { font-size: 15px; }
+.muted { color: var(--muted); margin-left: 8px; font-weight: normal; }
+.actions { display: flex; align-items: center; gap: 12px; }
+.status { color: var(--muted); font-size: 12px; min-width: 80px; text-align: right; }
+.status.ok { color: #16a34a; }
+.status.err { color: var(--danger); }
+
+button {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  /* 좁은 카드에서 "빼기" 같은 한글 라벨이 글자 단위로 부러지지 않게 */
+  white-space: nowrap;
+  flex: none;
+}
+button:hover { background: var(--panel-2); border-color: #d3d8e0; }
+button.ghost { background: transparent; padding: 3px 8px; font-size: 12px; box-shadow: none; }
+button.ghost:hover { background: var(--panel-2); }
+/* (Alex 2026-05-28) flipX 활성 표시 — accent 색으로 강조. */
+button.ghost.flip-btn.active { background: var(--accent, #0ea5e9); color: #fff; }
+button.ghost.flip-btn.active:hover { background: var(--accent, #0ea5e9); filter: brightness(1.1); }
+
+/* 공통 커스텀 툴팁 (data-tip). 네이티브 title 대체 — 위임형 단일 팝오버. */
+#sg-tip {
+  position: fixed;
+  z-index: 4000;
+  max-width: 360px;
+  padding: 6px 9px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--panel, #fff);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  box-shadow: 0 6px 22px rgba(15, 23, 42, 0.16);
+  pointer-events: none; /* 기본 툴팁은 통과 (호버 방해 없음) */
+  opacity: 0;
+  visibility: hidden;
+  word-break: break-word;
+  white-space: pre-line;
+}
+#sg-tip.open { opacity: 1; visibility: visible; }
+/* 복사 가능 툴팁: 마우스를 팝오버 안으로 옮겨 텍스트를 드래그·복사 (에이전트 협업) */
+#sg-tip.copyable { pointer-events: auto; }
+#sg-tip.copyable .sg-tip-text { user-select: text; cursor: text; font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 11px; }
+
+/* 좌측 파일트리 사이드바 + 본문 2단 레이아웃 (쿠마피커 도크 스타일) */
+#layout { display: flex; align-items: flex-start; min-width: 0; }
+#sidebar {
+  position: sticky;
+  top: var(--topbar-h, 49px); /* 실측값은 boot 가 --topbar-h 로 주입 */
+  flex: 0 0 320px;
+  width: 320px;
+  /* 내용 길이와 무관하게 좌측을 전체 높이로 가른다 (쫙 갈라진 스플릿) */
+  height: calc(100vh - var(--topbar-h, 49px));
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  padding: 12px 10px 24px 12px;
+}
+#sidebar:empty { display: none; }
+main { flex: 1; min-width: 0; padding: 18px; display: flex; flex-direction: column; gap: 26px; }
+
+/* 사이드바 접기/펴기 — 폭·패딩·투명도 트랜지션, 토글 탭은 경계선에 붙는다 */
+#sidebar { transition: flex-basis 0.28s ease, width 0.28s ease, padding 0.28s ease, opacity 0.2s ease; }
+body.sidebar-collapsed #sidebar {
+  flex-basis: 0;
+  width: 0;
+  padding-left: 0;
+  padding-right: 0;
+  opacity: 0;
+  overflow: hidden;
+  border-right: none;
+}
+#sidebar-toggle {
+  position: sticky;
+  top: calc(var(--topbar-h, 49px) + 12px);
+  z-index: 5;
+  flex: none;
+  align-self: flex-start;
+  width: 17px;
+  height: 46px;
+  margin-left: -1px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-left: none;
+  border-radius: 0 8px 8px 0;
+  background: var(--panel);
+  box-shadow: 1px 1px 4px rgba(0, 0, 0, 0.05);
+  cursor: pointer;
+}
+#sidebar-toggle svg { transition: transform 0.28s ease; color: var(--muted); }
+body.sidebar-collapsed #sidebar-toggle svg { transform: rotate(180deg); }
+#sidebar-toggle:hover svg { color: var(--accent, #0ea5e9); }
+
+.state {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px 18px;
+  /* 클릭 스크롤 도착 시 sticky 상단바가 타이틀을 가리지 않게 */
+  scroll-margin-top: calc(var(--topbar-h, 49px) + 14px);
+}
+.state-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.state-head .name { font-size: 16px; font-weight: 600; }
+.state-head .meta { color: var(--muted); font-size: 12px; }
+.state-head .action { color: var(--muted); font-size: 12px; font-style: italic; }
+.state-warn { color: var(--danger); font-size: 12px; }
+/* 여백 침범 정보 알림 — 경고가 아니라 순한 안내 톤 (리롤 대상 아님) */
+.state-note { color: var(--muted); font-size: 12px; border: 1px solid var(--line); border-radius: 5px; padding: 1px 7px; }
+/* 방향 앵커 배지 — 이 줄이 해당 방향의 identity 원천임을 표시 */
+.anchor-badge { color: var(--accent, #0ea5e9); font-size: 12px; font-weight: 600; border: 1px solid var(--accent-dim, rgba(14,165,233,0.35)); border-radius: 5px; padding: 1px 7px; white-space: nowrap; flex: none; }
+/* 방향 그룹 구분 헤더 (directions 계약 런) */
+.dir-head { font-size: 13px; font-weight: 700; letter-spacing: 0.02em; color: var(--muted); margin: 6px 2px -16px; text-transform: uppercase; }
+.dir-head.dir-mirror { font-weight: 500; font-style: italic; margin-bottom: -14px; }
+
+/* 생성 구조 트리 — base → idle 행 → 앵커 → rows 파이프라인 개요 */
+.pipeline-tree .tree { padding: 4px 2px 2px; }
+.pipeline-tree .tree ul { list-style: none; margin: 2px 0 0; padding-left: 26px; }
+.pipeline-tree .tree > ul { margin-left: 13px; }
+.pipeline-tree .tree li { position: relative; padding: 5px 0 3px 14px; }
+/* 커넥터 기하:
+   - 트렁크(li::before) = 계속 아래로 내려가는 직선. 마지막 자식은 트렁크 없음.
+   - 가지(li::after)   = 트렁크에서 노드로 꺾여 들어가는 └ 모양, 모서리는 라운드.
+   모든 가지가 부드러운 곡선으로 노드에 붙고, 마지막 가지는 곡선만 남아 끝난다. */
+.pipeline-tree .tree li::before {
+  content: "";
+  position: absolute;
+  left: -13px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--line);
+}
+.pipeline-tree .tree li:last-child::before { display: none; }
+.pipeline-tree .tree li::after {
+  content: "";
+  position: absolute;
+  left: -13px;
+  top: 0;
+  width: 27px;
+  height: 19px;
+  border-left: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  border-bottom-left-radius: 9px;
+  pointer-events: none;
+}
+.tree-node {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-2);
+  font-size: 12.5px;
+  vertical-align: middle;
+}
+.tree-node img {
+  height: 30px;
+  width: 30px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  background: repeating-conic-gradient(#ececec 0% 25%, #f8f8f8 0% 50%) 0 0 / 8px 8px;
+  border-radius: 4px;
+}
+.tree-node .thumb-missing { height: 30px; width: 30px; border: 1px dashed var(--line); border-radius: 4px; }
+.tree-node.pending { border-style: dashed; color: var(--muted); }
+.tree-node .tn-label { font-weight: 600; }
+.tree-node .tn-note { color: var(--muted); font-size: 11.5px; }
+.tree-node.clickable { cursor: pointer; }
+.tree-node.clickable:hover { border-color: var(--accent, #0ea5e9); }
+.tree-node.anchor { border-color: var(--accent-dim, rgba(14,165,233,0.4)); }
+.tree-node.anchor .tn-label { color: var(--accent, #0ea5e9); }
+.tree-node.mirror { border-style: dashed; font-style: italic; color: var(--muted); }
+.tree-node.tree-root { background: var(--panel); font-size: 13px; }
+/* 폴더 노드 — 파일트리 뼈대. 박스 없이 아이콘+경로 라벨만. 클릭 = 접기/펴기 */
+.tree-node.folder { border: none; background: transparent; padding: 2px 2px; }
+.tree-node.folder svg { color: var(--muted); flex: none; }
+.tree-node.folder .caret { transition: transform 0.2s ease; transform: rotate(90deg); }
+.folder-collapsed > .tree-node.folder .caret { transform: rotate(0deg); }
+.folder-collapsed > ul { display: none; }
+.tree-node.folder.clickable:hover { border: none; background: var(--panel-2); border-radius: 6px; }
+/* 파이프라인 / 파일 — 사이드바 상위 블록 */
+.tree-block { margin-bottom: 10px; }
+.tree-block > .tree-node.folder { font-weight: 700; }
+.tree-block > .tree-node.folder .tn-label { font-family: inherit; font-size: 12.5px; letter-spacing: 0.02em; text-transform: uppercase; }
+.tree-block > ul { margin-top: 2px; }
+
+/* 파이프라인 블록 — 트렁크에 대시가 아래로 흐른다 (파이프에 물 흐르듯, 느긋하게).
+   가지 곡선은 액센트 정적, 가지 끝(노드 왼쪽 모서리)에 화살촉이 정확히 붙는다. */
+.tree-block.pipeline li::before {
+  background:
+    repeating-linear-gradient(to bottom,
+      rgba(37, 99, 235, 0) 0 11px,
+      rgba(37, 99, 235, 0.75) 11px 16px),
+    linear-gradient(rgba(37, 99, 235, 0.28), rgba(37, 99, 235, 0.28));
+  background-size: 1px 27px, 1px 100%;
+  background-repeat: repeat-y, no-repeat;
+  animation: pipe-flow 2.3s linear infinite;
+}
+@keyframes pipe-flow {
+  to { background-position: 0 27px, 0 0; }
+}
+/* 파이프라인 가지는 CSS 곡선 대신 SVG(.branch)가 그린다 — 대시가 곡선을 타고 흐름 */
+.tree-block.pipeline li::after { display: none; }
+.tree-block.pipeline svg.branch {
+  position: absolute;
+  left: -7px;
+  top: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+.tree-block.pipeline svg.branch path { fill: none; stroke-linecap: round; }
+.tree-block.pipeline svg.branch .rail { stroke: rgba(37, 99, 235, 0.28); stroke-width: 1; }
+.tree-block.pipeline svg.branch .dash {
+  stroke: rgba(37, 99, 235, 0.75);
+  stroke-width: 1;
+  stroke-dasharray: 5 12;
+  animation: branch-flow 1.45s linear infinite;
+}
+@keyframes branch-flow {
+  to { stroke-dashoffset: -17; }
+}
+/* 화살촉: 가지 밑변(y=19px 라인) 연장선상에서 노드 모서리에 밀착 (li 좌표 기준) */
+.tree-block.pipeline li > .tree-node:first-of-type::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: 10px;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  border-left: 5px solid rgba(37, 99, 235, 0.6);
+}
+@media (prefers-reduced-motion: reduce) {
+  .tree-block.pipeline li::before { animation: none; }
+  .tree-block.pipeline svg.branch .dash { animation: none; }
+}
+
+/* 트리에서 이동해 온 대상 패널 하이라이트 — 도착 후 따닥! 두 번 깜빡이고 즉시 끝 */
+@keyframes target-flash {
+  0% { box-shadow: 0 0 0 2px rgba(37, 99, 235, 0); }
+  25% { box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.9); }
+  50% { box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.5); }
+  75% { box-shadow: 0 0 0 2px rgba(37, 99, 235, 1); }
+  100% { box-shadow: 0 0 0 2px rgba(37, 99, 235, 0); }
+}
+.state.flash-target { animation: target-flash 0.22s ease 1; }
+.tree-node.folder .tn-label { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+/* 런 경로: 한 줄 + 앞쪽 말줄임 — 뒤(폴더명)가 중요하므로 끝을 보여주고 앞을 …로.
+   direction:rtl 트릭; 전체 경로는 hover 툴팁(title). */
+.pipeline-tree .tree-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  display: block;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+  cursor: default;
+}
+
+/* 사이드바 안에서는 카드 껍데기를 벗고 세로 밀도 위주로 */
+#sidebar .pipeline-tree { background: transparent; border: none; border-radius: 0; padding: 2px 2px 8px; }
+#sidebar .pipeline-tree .state-head { flex-direction: column; align-items: flex-start; gap: 3px; margin-bottom: 8px; }
+#sidebar .pipeline-tree .state-head .name { font-size: 13px; }
+#sidebar .pipeline-tree .tree ul { padding-left: 14px; }
+#sidebar .pipeline-tree .tree li { padding-left: 8px; }
+#sidebar .pipeline-tree .tree li::before { left: -7px; }
+#sidebar .pipeline-tree .tree li::after { left: -7px; width: 15px; border-bottom-left-radius: 7px; }
+#sidebar .tree-rows { flex-direction: column; gap: 2px; }
+#sidebar .tree-node { font-size: 12px; padding: 2px 7px; max-width: 100%; }
+#sidebar .tree-node .tn-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sidebar .tree-node .tn-note { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#sidebar .tree-node img { height: 22px; width: 22px; }
+#sidebar .tree-node.raw-only img { width: 40px; }
+#sidebar .tree-node.tree-root img { height: 28px; width: 28px; }
+.tree-rows { display: flex; flex-wrap: wrap; gap: 0 4px; }
+.tree-rows li { padding-right: 0; }
+/* raw 는 생성됐고 추출 전 — 중간 진행 상태 (raw 스트립 썸네일) */
+.tree-node.raw-only { border-style: dotted; }
+.tree-node.raw-only img { width: 52px; object-fit: cover; }
+
+/* 런 세대 변경 배너 — 폴링이 프레임 재생성을 감지하면 표시 */
+#reload-banner {
+  position: fixed;
+  left: 50%;
+  bottom: 26px;
+  transform: translateX(-50%);
+  z-index: 3000;
+  background: var(--accent, #0ea5e9);
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 9px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+}
+
+/* 큐레이션 무효화 알림 — 프레임 재생성으로 드롭된 행 + 백업 파일 안내 (조용한 소실 금지) */
+#curation-dropped-note {
+  position: sticky;
+  top: 0;
+  z-index: 2500;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  font-size: 12.5px;
+  background: rgba(234, 179, 8, 0.12);
+  border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+}
+#curation-dropped-note button { margin-left: auto; }
+
+/* 복제 인스턴스 배지 — 원본 프레임 번호를 항상 노출 */
+.clone-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10.5px;
+  opacity: 0.85;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  border-radius: 5px;
+  padding: 0 5px;
+}
+
+.state-body { display: flex; gap: 18px; align-items: flex-start; min-width: 0; }
+.frames {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+  flex: 1;
+  /* (Alex 2026-05-28) flex child 가 content (3000px+) 만큼 늘어나면 overflow-x:auto
+     가 발화 안 함 — 가로 18 frame 다 못 봄. min-width:0 으로 flex 의 default
+     min-content 동작을 끄고 부모 폭에 fit + 가로 scrollbar 가 발화하도록. */
+  min-width: 0;
+}
+
+.card {
+  flex: 0 0 auto;
+  width: 168px;
+  background: var(--panel-2);
+  border: 2px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+  user-select: none;
+}
+.card.selected { border-color: var(--accent); }
+.card.missing { border-style: dashed; }
+
+/* two rows per state: sequence (top) + candidate pool (bottom) */
+.zones { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.zone { border-radius: 8px; padding: 6px 8px 4px; }
+.zone-seq { background: rgba(37, 99, 235, 0.04); border: 1px solid var(--accent-dim); }
+.zone-pool { background: rgba(17, 24, 39, 0.02); border: 1px dashed var(--line); }
+.zone-label {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 2px 2px 6px;
+  letter-spacing: 0.03em;
+}
+.zone .frames { flex: none; min-height: 64px; } /* droppable even when empty */
+
+.card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  /* 헤더(타이틀 줄) 전체가 드래그 핸들 — 타이틀을 잡고 임계값을 넘으면 순서변경/
+     시퀀스↔풀 이동. 그냥 클릭은 아무 것도 안 한다 (수홍 2026-07-15). 우측 아이콘
+     버튼은 pointerdown 전파를 끊어 드래그를 시작하지 않는다. */
+  cursor: grab;
+  padding: 1px 1px 1px 2px;
+  touch-action: none; /* claim the pointer so the scroll row doesn't steal the drag */
+}
+.card-top:active { cursor: grabbing; }
+.card.dragging .card-top { cursor: grabbing; }
+.card-top .ct-left {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+.card-top .idx {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+} /* long imported labels truncate instead of breaking the card-top layout */
+/* 실콘텐츠 픽셀 크기 — 타이틀 옆 인라인 (한 줄 정보). 사이즈 통일 검수용. */
+.card-top .psize {
+  font-size: 10.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex: none;
+}
+.card.dragging {
+  border-color: var(--accent);
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.18);
+  opacity: 0.97;
+  cursor: grabbing;
+  transition: none; /* fixed-positioned card must track the cursor 1:1 */
+}
+/* the gap the lifted card will drop into */
+.card-placeholder {
+  flex: 0 0 auto;
+  border-radius: 8px;
+  border: 2px dashed var(--accent-dim);
+  background: rgba(37, 99, 235, 0.05);
+}
+
+.stage {
+  position: relative;
+  width: 152px;
+  aspect-ratio: var(--cell-aspect, 1);
+  border-radius: 5px;
+  overflow: hidden;
+  cursor: grab;
+  background-color: var(--checker-a);
+  background-image:
+    linear-gradient(45deg, var(--checker-b) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--checker-b) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--checker-b) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--checker-b) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+}
+.stage:active { cursor: grabbing; }
+.stage img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform-origin: center;
+  pointer-events: none;
+  z-index: 1;
+}
+/* 원본 픽셀보다 확대 표시될 때만 붙는 클래스 — 픽셀아트 계단을 그대로 보여준다 */
+.stage img.px-upscale,
+.preview canvas.px-upscale { image-rendering: pixelated; }
+/* 변형 편집 중 실시간 격자 스냅 프리뷰 캔버스 (픽셀퍼펙트 줄 전용, applyCardTransform 소유) */
+.stage .snap-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  display: none;
+  pointer-events: none;
+  image-rendering: pixelated;
+}
+.grid-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  display: none;
+  pointer-events: none;
+}
+body.show-grid .grid-overlay { display: block; }
+body.show-grid .stage { background-image: none; background-color: #eef0f3; }
+.rotate-handle {
+  position: absolute;
+  top: 4px;
+  left: 50%;
+  width: 16px;
+  height: 16px;
+  margin-left: -8px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid #fff;
+  cursor: grab;
+  opacity: 0;
+  transition: opacity 0.12s;
+  z-index: 2;
+}
+.stage:hover .rotate-handle { opacity: 0.9; }
+.shear-handle {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: #ffb450;
+  border: 2px solid #fff;
+  cursor: nwse-resize;
+  opacity: 0;
+  transition: opacity 0.12s;
+  z-index: 2;
+}
+.stage:hover .shear-handle { opacity: 0.9; }
+.missing-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+/* 푸터 2층: (1) 정보 줄 — 크기·변형값 (봐야 하는 정보) / (2) 버튼 줄 */
+.card-info {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 6px;
+  min-height: 14px;
+}
+.card-info .psize { font-size: 10.5px; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; flex: none; }
+.card-info .tvals { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+.card-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+}
+.tvals { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.preview {
+  flex: 0 0 auto;
+  width: 180px;
+  text-align: center;
+}
+.preview h4 { margin: 0 0 6px; font-size: 12px; color: var(--muted); font-weight: 500; }
+.preview canvas {
+  width: 160px;
+  border-radius: 6px;
+  background-color: var(--checker-a);
+  background-image:
+    linear-gradient(45deg, var(--checker-b) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--checker-b) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--checker-b) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--checker-b) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+}
+.preview .count { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.pv-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin-top: 8px;
+}
+.pv-controls button.ghost {
+  padding: 3px 8px;
+  font-size: 13px;
+  line-height: 1;
+}
+.pv-controls .pv-play { min-width: 32px; }
+.pv-controls button:disabled { opacity: 0.4; cursor: default; }
+.pv-controls button:disabled:hover { background: transparent; }
+.pv-speed {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 3px 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.pv-pos {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.fatal {
+  margin: 40px auto;
+  max-width: 560px;
+  background: var(--panel);
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  padding: 18px;
+  color: var(--danger);
+  white-space: pre-wrap;
+}
+
+/* pixel-perfect apply checkbox (top-right) + view toggle */
+.pp-apply {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg, #ddd);
+  border: 1px solid var(--line, #3a3a3a);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.pp-apply input {
+  margin: 0;
+  cursor: pointer;
+}
+
+/* top base reference row */
+.base-row .base-stage {
+  padding: 12px;
+  display: flex;
+  justify-content: flex-start;
+}
+.base-row .base-stage img {
+  max-width: 100%;
+  max-height: 240px;
+  image-rendering: pixelated;
+  border: 1px solid var(--line, #3a3a3a);
+  border-radius: 8px;
+  background:
+    repeating-conic-gradient(#e8e8e8 0% 25%, #f7f7f7 0% 50%) 0 0 / 16px 16px;
+}
+
+/* 패시브 픽셀 렌더링 — 확대 표시에서 안티앨리어싱으로 뭉개지지 않게 항상 nearest */
+.stage img,
+.preview canvas,
+.base-row .base-stage img {
+  image-rendering: pixelated;
+}
+
+/* 픽셀 그리드 오버레이 (줄별 체크박스 / 상단 전체 토글) — display 는 sizePxGrids 가 소유 */
+.stage .pxgrid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  display: none;
+  background-image:
+    linear-gradient(to right, rgba(220, 40, 40, 0.28) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(40, 110, 220, 0.28) 1px, transparent 1px);
+}
+
+/* 상태별 생성 ref 칩 (어떤 재료로 이 줄을 생성했는가) + 우측 줄별 표시/굽기 컨트롤 */
+.state-refs { display: flex; align-items: center; gap: 8px; margin: 2px 0 8px; flex-wrap: wrap; }
+.state-refs .refs-label { font-size: 12px; opacity: 0.6; }
+.state-refs .row-controls { margin-left: auto; display: inline-flex; gap: 8px; }
+.row-toggle { padding: 3px 8px; background: var(--panel, transparent); }
+
+/* 하단 힌트바 — 힌트 span 이 구분자 없이 붙지 않게 (실사고 2026-07-14 픽) */
+.hintbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 18px;
+  padding: 10px 16px 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.hintbar span { position: relative; }
+.hintbar span + span::before {
+  content: "·";
+  position: absolute;
+  left: -11px;
+  color: var(--line);
+}
+
+/* 검출된 입력 격자 오버레이 (원본 표시 줄 전용) — 추출이 실제로 자른 절단선, 초록 */
+.stage .ingrid {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  display: none;
+  z-index: 2;
+}
+
+/* 보관함 — 후보 풀에서도 제외한 프레임. 접힌 칩 + 쇽 팝오버 + 드래그 복구 */
+.archive-wrap { position: relative; margin-top: 6px; display: flex; }
+.archive-wrap.empty { opacity: 0.45; }
+.archive-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--muted);
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  padding: 2px 9px;
+}
+.archive-chip:hover { border-color: var(--accent, #0ea5e9); color: var(--accent, #0ea5e9); }
+.archive-pop {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 50;
+  min-width: 180px;
+  max-width: 420px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 8px 10px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.14);
+  transform: translateY(6px) scale(0.92);
+  transform-origin: left bottom;
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 0.16s cubic-bezier(0.2, 1.4, 0.4, 1), opacity 0.14s ease;
+}
+.archive-pop.open { transform: none; opacity: 1; pointer-events: auto; }
+.archive-pop .ap-hint { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+.ap-cards { display: flex; flex-wrap: wrap; gap: 6px; }
+.ap-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 7px;
+  font-size: 11.5px;
+  background: var(--panel-2);
+  cursor: grab;
+  user-select: none;
+}
+.ap-card img { height: 26px; width: 26px; object-fit: contain; image-rendering: pixelated; }
+.ap-ghost { position: fixed; z-index: 3000; pointer-events: none; opacity: 0.85; }
+/* 확대 스크러버 — 스테이지 내부 우하단, 호버 시 표시. [−][돋보기⁺ 드래그][+] */
+.stage .scale-scrub {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 1px 3px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.stage:hover .scale-scrub { opacity: 1; }
+.scale-scrub .ss-step { padding: 2px 3px; }
+.scale-scrub .ss-grab { cursor: ew-resize; padding: 2px 3px; display: inline-flex; touch-action: none; }
+.scale-scrub .ss-grab:hover, .scale-scrub .ss-step:hover { color: var(--accent, #0ea5e9); }
+
+/* 버튼 줄: [반전][초기화] ... [넣기/빼기][보관] (오른쪽 그룹) */
+.card-controls .flip-btn, .card-controls .reset-btn { flex: none; }
+/* 넣기·빼기 + 보관을 한 묶음으로 오른쪽 정렬 (성격이 비슷한 멤버십 액션) */
+.card-controls .ctrl-group { margin-left: auto; display: inline-flex; align-items: center; gap: 3px; flex: none; }
+
+/* 헤더 우측 아이콘 버튼 (복제·확대) — 균일한 라인 아이콘 버튼 */
+.card-top .ct-right { display: inline-flex; align-items: center; gap: 2px; flex: none; }
+.card-top .ct-right .ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  border-radius: 5px;
+  color: var(--muted);
+  line-height: 0;
+}
+.card-top .ct-right .ghost:hover { color: var(--accent, #0ea5e9); background: rgba(37, 99, 235, 0.08); }
+.card-top .zoom-btn { cursor: zoom-in; }
+
+/* 넣기/빼기 = 시퀀스⇄풀 토글 버튼. 색상 강조 없이 방향 아이콘(위/아래)+라벨로만 구분. */
+.sel-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  padding: 2px 7px 2px 5px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+.sel-btn svg { display: block; }
+.sel-btn:hover { border-color: var(--accent, #0ea5e9); color: var(--accent, #0ea5e9); }
+/* 보관 버튼: 그룹 안의 아이콘 전용 */
+.card-controls .arch-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 3px; border-radius: 5px; color: var(--muted); line-height: 0;
+}
+.card-controls .arch-btn:hover { color: var(--accent, #0ea5e9); background: rgba(37, 99, 235, 0.08); }
+
+/* 픽셀 편집 툴바 (확대 모달) */
+.edit-toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.edit-toolbar .ghost { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 6px; }
+.edit-toolbar .ghost.active { background: var(--accent, #0ea5e9); color: #fff; border-color: transparent; }
+.et-swatches { display: inline-flex; gap: 3px; }
+.swatch { width: 18px; height: 18px; padding: 0; border: 1px solid rgba(0, 0, 0, 0.18); border-radius: 4px; cursor: pointer; box-shadow: none; }
+.et-color { width: 26px; height: 22px; padding: 0 1px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); cursor: pointer; }
+.et-note { font-size: 11px; }
+.stage.pixel-editing { cursor: crosshair; }
+/* 스포이드 모드 = 색 집기 커서 (copy) 로 구분 */
+.stage.pixel-editing.picking { cursor: copy; }
+.stage.pixel-editing .rotate-handle, .stage.pixel-editing .shear-handle, .stage.pixel-editing .scale-scrub { display: none; }
+
+/* 보관함 풀 모달 — 일반 카드 크기 그리드 + 복구 버튼 */
+#archive-modal { position: fixed; inset: 0; z-index: 2000; display: flex; align-items: center; justify-content: center; padding: 24px; }
+#archive-modal .zoom-backdrop { position: absolute; inset: 0; background: rgba(15, 18, 24, 0.5); }
+/* 카드가 많아도 화면 밖으로 넘치지 않게 — 모달 자체를 뷰포트에 가두고 내부 스크롤.
+   #archive-modal 스코프로 .zoom-card.card 기본값을 확실히 덮는다 (특정성). */
+#archive-modal .arch-modal-card {
+  position: relative;
+  z-index: 1;
+  width: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: min(92vw, 900px);
+  max-height: 86vh;
+  overflow: hidden;
+}
+#archive-modal .arch-modal-card .zoom-head { flex: none; }
+.arch-grid { display: flex; flex-wrap: wrap; gap: 12px; overflow: auto; padding: 2px; align-content: flex-start; }
+.arch-card { width: 150px; }
+.arch-card .stage { cursor: default; }
+.arch-card .card-controls { justify-content: center; gap: 6px; }
+
+/* 확대 편집 모달 — 한 프레임 크게, 격자/픽셀퍼펙트 토글하며 조정 */
+#zoom-modal { position: fixed; inset: 0; z-index: 2000; display: flex; align-items: center; justify-content: center; }
+#zoom-modal .zoom-backdrop { position: absolute; inset: 0; background: rgba(15, 18, 24, 0.5); }
+.zoom-card.card {
+  position: relative;
+  z-index: 1;
+  width: auto;
+  max-width: 94vw;
+  max-height: 94vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px 12px;
+  background: var(--panel, #fff);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
+  border-radius: 12px;
+}
+.zoom-head { display: flex; align-items: center; gap: 8px; }
+.zoom-head .zoom-title { font-weight: 600; font-size: 15px; margin-right: 6px; }
+.zoom-head .row-controls { margin-left: auto; display: inline-flex; gap: 8px; }
+/* flex 컨테이너(column)가 높이를 눌러 aspect-ratio 를 깨지 않게 — 확대는 스크롤로 수용.
+   (실사고 2026-07-14: max-height 94vh 에 닿으면 flex-shrink 가 스테이지 높이만 줄여
+   스프라이트/격자가 가로로 찌그러졌다.) */
+.zoom-card .stage { width: 480px; flex: 0 0 auto; }
+.ref-chip { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; color: inherit;
+  border: 1px solid rgba(128,128,128,0.3); border-radius: 6px; padding: 2px 8px 2px 2px; }
+.ref-chip:hover { border-color: rgba(128,128,128,0.6); }
+.ref-chip img { height: 40px; width: auto; border-radius: 4px; display: block; }
+.ref-chip span { font-size: 11px; opacity: 0.8; }
+
+/* 줄 단위 GIF 다운로드 버튼 — row-controls 안, 체크박스 토글과 같은 높이 */
+.gif-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--fg-dim, #64748b);
+  background: transparent;
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.gif-btn:hover { color: var(--fg, #0f172a); border-color: var(--fg-dim, #94a3b8); }
+.gif-btn:disabled { opacity: 0.5; cursor: default; }
+.gif-btn svg { display: block; }
+
+/* 최종 아틀라스 섹션 — 페이지 맨 아래: 시트(좌) | 런타임 manifest(우) */
+.final-atlas .atlas-split {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  margin-top: 10px;
+}
+.final-atlas .atlas-sheet {
+  flex: 0 1 52%;
+  min-width: 0;
+  display: block;
+  background:
+    repeating-conic-gradient(rgba(148, 163, 184, 0.18) 0% 25%, transparent 0% 50%) 0 0 / 16px 16px;
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 8px;
+  padding: 8px;
+}
+.final-atlas .atlas-sheet img {
+  display: block;
+  width: 100%;
+  height: auto;
+  image-rendering: pixelated;
+}
+.final-atlas .atlas-doc {
+  flex: 1 1 48%;
+  min-width: 0;
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.final-atlas .atlas-doc-head {
+  padding: 6px 10px;
+  font-size: 11.5px;
+  color: var(--fg-dim, #64748b);
+  border-bottom: 1px solid var(--line, #e2e8f0);
+  background: var(--bg-soft, #f8fafc);
+}
+.final-atlas .atlas-doc-json {
+  margin: 0;
+  padding: 10px;
+  max-height: 420px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre;
+}
+.final-atlas .atlas-pending {
+  margin-top: 10px;
+  padding: 18px;
+  border: 1px dashed var(--line, #cbd5e1);
+  border-radius: 8px;
+  color: var(--fg-dim, #64748b);
+  font-size: 12.5px;
+}
+.tree-node.atlas-node img { image-rendering: pixelated; }
