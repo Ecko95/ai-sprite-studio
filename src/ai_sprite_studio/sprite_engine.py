@@ -47,7 +47,10 @@ _MEDIA_FORMATS = {
     "JPEG": ("image/jpeg", {".jpg", ".jpeg"}),
     "WEBP": ("image/webp", {".webp"}),
 }
-_ABSOLUTE_PATH = re.compile(r"(?<![\w.-])/(?:[^\s\"']+)")
+_ABSOLUTE_PATH = re.compile(
+    r"(?<![\w.-])(?:/(?:[^\s\"']+)|[A-Za-z]:[\\/](?:[^\s\"']+)|"
+    r"\\\\[^\s\\/\"']+[\\/][^\s\"']+)"
+)
 _PIXEL_EDIT_COORDINATE = re.compile(r"(0|[1-9]\d*),(0|[1-9]\d*)\Z")
 _CURATION_TRANSFORM_FIELDS = {"rotate", "scale", "dx", "dy", "shx", "shy", "flipX"}
 _ENGINE_MUTATION_LOCK = RLock()
@@ -411,7 +414,8 @@ class SpriteEngine:
             project = self.store.load(project_id)
             run_dir, state = self._extracted_state(project.id)
             with read_guard(run_dir):
-                payload = load_curation(run_dir)
+                self._current_pixel_dependencies(project.id, run_dir, state)
+                payload = self._load_curation(run_dir)
                 revision = run_revision(run_dir)
                 curation_ids = self._current_curation_dependencies(project.id, run_dir, state)
                 return self._curation_snapshot(
@@ -446,6 +450,7 @@ class SpriteEngine:
                 submitted, int(request["states"][_UPLOAD_STATE]["frames"])
             )
             with read_guard(run_dir):
+                pixel_ids = self._current_pixel_dependencies(project.id, run_dir, state)
                 current = run_revision(run_dir)
                 if expected != current:
                     raise SpriteEngineError("stale curation revision")
@@ -453,7 +458,6 @@ class SpriteEngine:
                 sidecar_text = json.dumps(stamped, ensure_ascii=False, indent=2) + "\n"
                 sidecar_bytes = sidecar_text.encode()
                 atomic_write_text(run_dir / "curation.json", sidecar_text)
-                pixel_ids = self._state_uuids(state, "pixel_artifact_ids")
                 artifact = self._put_artifact(
                     project.id,
                     sidecar_bytes,
@@ -485,8 +489,17 @@ class SpriteEngine:
         run_dir, state = self._extracted_state(project.id)
         pixel_ids = self._current_pixel_dependencies(project.id, run_dir, state)
         curation_ids = self._current_curation_dependencies(project.id, run_dir, state)
-        result = self._invoke_writer("compose", run_dir, compose_atlas.run, run_dir=run_dir)
-        self._require_success("compose", result)
+        with _curation_boundary("compose"):
+            self._load_curation(run_dir)
+        try:
+            result = self._invoke_writer("compose", run_dir, compose_atlas.run, run_dir=run_dir)
+            self._require_success("compose", result)
+        except SpriteEngineError:
+            try:
+                self._current_pixel_dependencies(project.id, run_dir, state)
+            except SpriteEngineError:
+                pass
+            raise
 
         self._current_pixel_dependencies(project.id, run_dir, state)
         if self._current_curation_dependencies(project.id, run_dir, state) != curation_ids:
@@ -542,9 +555,16 @@ class SpriteEngine:
         project = self.store.load(project_id)
         run_dir, state = self._extracted_state(project.id)
         dependencies = self._current_pixel_dependencies(project.id, run_dir, state)
-        report = self._invoke("inspect", sprite_inspect.inspect_run, run_dir, states=_UPLOAD_STATE)
-        if not isinstance(report, dict):
-            raise SpriteEngineError("sprite inspection failed")
+        try:
+            report = self._invoke("inspect", sprite_inspect.inspect_run, run_dir, states=_UPLOAD_STATE)
+            if not isinstance(report, dict):
+                raise SpriteEngineError("sprite inspection failed")
+        except SpriteEngineError:
+            try:
+                self._current_pixel_dependencies(project.id, run_dir, state)
+            except SpriteEngineError:
+                pass
+            raise
         self._current_pixel_dependencies(project.id, run_dir, state)
         summary = self._redact(report, run_dir)
         report_path = run_dir / "sprite-inspect.report.json"
@@ -669,11 +689,33 @@ class SpriteEngine:
             raise SpriteEngineError("sprite curation provenance is unavailable") from exc
         return (artifact_id,)
 
+    @staticmethod
+    def _load_curation(run_dir: Path) -> dict[str, Any] | None:
+        try:
+            payload = load_curation(run_dir)
+        except AttributeError as exc:
+            raise SpriteEngineError("invalid sprite curation") from exc
+        if payload is not None and (
+            not isinstance(payload, dict)
+            or ("states" in payload and not isinstance(payload["states"], dict))
+        ):
+            raise SpriteEngineError("invalid sprite curation")
+        return payload
+
+    def _reset_derived_state(self, run_dir: Path, state: dict[str, Any]) -> None:
+        self._write_state(
+            run_dir,
+            {
+                "input_artifact_id": str(self._state_uuid(state, "input_artifact_id")),
+                "request_artifact_id": str(self._state_uuid(state, "request_artifact_id")),
+            },
+        )
+
     def _current_pixel_dependencies(
         self, project_id: UUID, run_dir: Path, state: dict[str, Any]
     ) -> tuple[UUID, ...]:
-        pixel_ids = self._state_uuids(state, "pixel_artifact_ids")
         try:
+            pixel_ids = self._state_uuids(state, "pixel_artifact_ids")
             expected_files = self._relative_files(state.get("pixel_files"), "sprite frame provenance")
             manifest = self._json_file(
                 self._run_file(run_dir, "frames/frames-manifest.json"), "sprite extraction report"
@@ -699,8 +741,10 @@ class SpriteEngine:
                 ):
                     raise SpriteEngineError("sprite frame provenance is unavailable")
         except SpriteEngineError:
+            self._reset_derived_state(run_dir, state)
             raise
         except (OSError, ProjectStoreError) as exc:
+            self._reset_derived_state(run_dir, state)
             raise SpriteEngineError("sprite frame provenance is unavailable") from exc
         return pixel_ids
 
