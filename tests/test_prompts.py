@@ -105,6 +105,8 @@ def test_cross_reference_corrections_are_rendered_without_editing_sources() -> N
     assert "screen-left" not in directions.text
     assert "For mirrored projects, left is a horizontal flip of right" in directions.text
     assert "For independent-side projects, generate left separately." in directions.text
+    assert "![W canonical reference]" not in directions.text
+    assert "![Right canonical reference]" in directions.text
     assert snapped.provenance["correction_ids"] == ["direction-policy-right-up-left"]
     assert "N/S/E/W" not in snapped.text
     assert "For mirrored projects, left is derived by mirroring right." in snapped.text
@@ -284,6 +286,42 @@ def test_direction_substitutions_match_context_and_mirror_policy() -> None:
     assert "For independent-side projects, generate left separately." in independent_left.text
 
 
+def test_action_poseboards_require_and_canonicalize_their_direction() -> None:
+    independent = ProjectConfig(side_policy="independent")
+    substitutions = {
+        "ACTION": "attack",
+        "DIRECTION_DESCRIPTION": "profile view, facing screen-right",
+        "COLS": 4,
+        "ROWS": 3,
+        "N": 4,
+        "CANVAS_W": 2048,
+        "CANVAS_H": 1536,
+        "FRAME_BY_FRAME_DESCRIPTION": "Frame 1: ready stance. Frame 2: strike.",
+        "ACTION_SPECIFIC_CONSTRAINTS": "Keep the weapon readable.",
+    }
+
+    with pytest.raises(PromptError, match="explicit direction"):
+        render_prompt("action_poseboards", independent, substitutions, state="attack")
+    with pytest.raises(PromptError, match="description"):
+        render_prompt(
+            "action_poseboards",
+            independent,
+            {**substitutions, "DIRECTION_DESCRIPTION": "profile view, facing screen-left"},
+            direction="right",
+            state="attack",
+        )
+
+    rendered = render_prompt(
+        "action_poseboards",
+        independent,
+        {**substitutions, "DIRECTION_DESCRIPTION": "profile view, facing screen-left"},
+        direction="left",
+        state="attack",
+    )
+
+    assert rendered.provenance["locked_context"]["direction"] == "left"
+
+
 @pytest.mark.parametrize(
     "record",
     [
@@ -388,7 +426,7 @@ def test_all_stage_renderings_have_stable_semantic_snapshots() -> None:
     assert actual == {
         "base_generation": "10995a4a5c59aac8be97304b9931929d99e17cf674fe0191cdaebd1606d484e7",
         "base_snap": "e47e852431f7279090a1b081a942973515edf8b62190d8f9b957ac273e0e9a29",
-        "directional_anchors": "169cea44e09b922c7c1404f4ecf1cc8198108ebd12c642fdb794ec1f0e77f882",
+        "directional_anchors": "cbfdc615eaec5030bbbf817cb9fb9594f9dc2435062525c35249ac1e746b72cb",
         "action_poseboards": "2c244bd33bb8a48171c510081bc70fb14e8624026f6aa5463fbf3cd55e97fd48",
         "frame_recovery": "c7622d314cbdbc40eafa37cc1c11cd222317bd78dc4329a5c9ef191252638f71",
         "walk_i2v": "4b11cdb5fa5c29e7303e9bd5a0f5e463ba526cc1a252319b79a205b1ed8e9425",

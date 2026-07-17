@@ -1,8 +1,10 @@
 import errno
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
+from threading import Event, Thread
 from uuid import uuid4
 
 import pytest
@@ -634,3 +636,72 @@ def test_invalidate_dependants_marks_only_transitive_children_stale_and_keeps_fi
     assert grandchild_path.is_file()
     with pytest.raises(ProjectStoreError, match="stale"):
         store.approve(project.id, "directions", [child.id])
+
+
+def test_manifest_mutations_hold_a_project_lock_until_the_new_manifest_is_published(
+    store, tmp_path, monkeypatch
+):
+    project = _project(store)
+    root = _artifact(store, project.id, stage="root")
+    child = _artifact(store, project.id, dependencies=[root.id], stage="child")
+    project_root = tmp_path / "projects" / str(project.id)
+    lock_path = project_root / ".project.lock"
+    writer_ready = Event()
+    release_writer = Event()
+    invalidation_started = Event()
+    invalidation_finished = Event()
+    errors: list[BaseException] = []
+    real_write = store._write_project_at
+    paused = False
+
+    def pause_first_manifest_write(project_fd, updated):
+        nonlocal paused
+        if not paused:
+            paused = True
+            writer_ready.set()
+            if not release_writer.wait(5):
+                raise RuntimeError("writer release timed out")
+        return real_write(project_fd, updated)
+
+    def capture(operation):
+        try:
+            operation()
+        except BaseException as exc:  # pragma: no cover - assertion reports it below
+            errors.append(exc)
+
+    monkeypatch.setattr(store, "_write_project_at", pause_first_manifest_write)
+    writer = Thread(
+        target=lambda: capture(
+            lambda: _artifact(store, project.id, stage="writer", data=b"writer")
+        )
+    )
+    writer.start()
+    try:
+        assert writer_ready.wait(5)
+        assert lock_path.is_file()
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
+
+        def invalidate() -> None:
+            invalidation_started.set()
+            capture(lambda: store.invalidate_dependants(project.id, [root.id]))
+            invalidation_finished.set()
+
+        invalidator = Thread(target=invalidate)
+        invalidator.start()
+        assert invalidation_started.wait(5)
+        assert not invalidation_finished.wait(0.1)
+    finally:
+        release_writer.set()
+        writer.join(5)
+        if "invalidator" in locals():
+            invalidator.join(5)
+
+    assert not writer.is_alive()
+    assert not invalidator.is_alive()
+    assert not errors
+    assert {artifact.id: artifact for artifact in store.load(project.id).artifacts}[child.id].stale

@@ -40,9 +40,19 @@ _PROVENANCE_KEYS = frozenset(
         "rendered_sha256",
     }
 )
-_DIRECTION_SUBSTITUTION_STAGES = frozenset({"directional_anchors", "walk_i2v"})
+_DIRECTION_SENSITIVE_STAGES = frozenset(
+    {"directional_anchors", "action_poseboards", "walk_i2v"}
+)
 _MIRRORED_GENERATION_STAGES = frozenset(
     {"directional_anchors", "action_poseboards", "walk_i2v"}
+)
+_ACTION_DIRECTION_DESCRIPTIONS = MappingProxyType(
+    {
+        "down": "front view, facing down",
+        "right": "profile view, facing screen-right",
+        "up": "back view, facing up",
+        "left": "profile view, facing screen-left",
+    }
 )
 
 
@@ -313,15 +323,25 @@ def _validate_direction_substitution(
     substitutions: Mapping[str, str],
     direction: str | None,
 ) -> None:
-    if stage_key in _DIRECTION_SUBSTITUTION_STAGES and "DIRECTION" in substitutions:
-        if direction is None or substitutions["DIRECTION"] != direction:
-            raise PromptError("DIRECTION substitution must match the supplied direction")
+    if stage_key not in _DIRECTION_SENSITIVE_STAGES:
+        return
+    if direction is None:
+        raise PromptError("direction-sensitive prompts require an explicit direction")
     if (
         stage_key in _MIRRORED_GENERATION_STAGES
         and project.side_policy == "mirror"
         and direction == "left"
     ):
         raise PromptError("mirrored projects derive left instead of generating it")
+    if "DIRECTION" in substitutions and substitutions["DIRECTION"] != direction:
+        raise PromptError("DIRECTION substitution must match the supplied direction")
+    if stage_key == "action_poseboards":
+        try:
+            expected_description = _ACTION_DIRECTION_DESCRIPTIONS[direction]
+        except KeyError as exc:
+            raise PromptError("direction is not configured for this project") from exc
+        if substitutions.get("DIRECTION_DESCRIPTION") != expected_description:
+            raise PromptError("action poseboard direction description must match its direction")
 
 
 def _canonical_persisted_prompt(
@@ -401,6 +421,9 @@ def _apply_corrections(stage_key: str, source: str) -> tuple[str, tuple[str, ...
         ).replace(
             "The W canonical reference used by every action in the west direction:",
             "The right canonical reference used by every action in the right direction:",
+        ).replace(
+            "![W canonical reference]",
+            "![Right canonical reference]",
         ).replace(
             "![Directional anchors NSEW]",
             "![Directional anchors (down/right/up with policy-specific left)]",

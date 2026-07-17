@@ -476,6 +476,8 @@ def test_gate_revalidates_generic_predecessor_approvals_against_pipeline_policy(
         media_type="image/png",
         variant="raw",
     )
+    valid_snap = _base_snap(store, wrong_project.id, wrong_source.id, b"valid")
+    valid_directions = _directions(store, wrong_project.id, valid_snap, b"directions")
     wrong_snap = store.put_artifact(
         wrong_project.id,
         b"wrong snap",
@@ -485,11 +487,10 @@ def test_gate_revalidates_generic_predecessor_approvals_against_pipeline_policy(
         variant="raw",
         dependencies=[wrong_source.id],
     )
-    wrong_directions = _directions(store, wrong_project.id, wrong_snap, b"directions")
     store.approve(wrong_project.id, "base", [wrong_snap.id])
 
     with pytest.raises(PipelineError, match="base approval.*direct input"):
-        approve_gate(store, wrong_project.id, "directions", [wrong_directions.id])
+        approve_gate(store, wrong_project.id, "directions", [valid_directions.id])
 
 
 def test_stage_persistence_rechecks_dependencies_after_pipeline_preflight(monkeypatch, tmp_path) -> None:
@@ -599,3 +600,80 @@ def test_partial_approval_replacement_invalidates_only_removed_roots(tmp_path) -
     artifacts = {artifact.id: artifact for artifact in store.load(project.id).artifacts}
     assert artifacts[removed_directions.id].stale
     assert not artifacts[retained_directions.id].stale
+
+
+def test_stage_artifacts_reject_malformed_canonical_ancestor_lineage(tmp_path) -> None:
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig())
+    malformed_generation = store.put_artifact(
+        project.id,
+        b"malformed base",
+        kind="base_generation",
+        stage="base_generation",
+        media_type="image/png",
+        variant="raw",
+    )
+
+    with pytest.raises(PipelineError, match="direct input"):
+        put_stage_artifact(
+            store,
+            project.id,
+            "base_snap",
+            b"snap",
+            media_type="image/png",
+            dependencies=[malformed_generation.id],
+        )
+
+
+def test_gate_rejects_a_malformed_canonical_ancestor_in_a_stored_approval(tmp_path) -> None:
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig())
+    source = store.put_artifact(
+        project.id,
+        b"identity",
+        kind="input",
+        media_type="image/png",
+        variant="raw",
+    )
+    valid_snap = _base_snap(store, project.id, source.id, b"valid")
+    directions = _directions(store, project.id, valid_snap, b"directions")
+    malformed_generation = store.put_artifact(
+        project.id,
+        b"malformed base",
+        kind="base_generation",
+        stage="base_generation",
+        media_type="image/png",
+        variant="raw",
+    )
+    malformed_snap = store.put_artifact(
+        project.id,
+        b"malformed snap",
+        kind="base_snap",
+        stage="base_snap",
+        media_type="image/png",
+        variant="raw",
+        dependencies=[malformed_generation.id],
+    )
+    store.approve(project.id, "base", [malformed_snap.id])
+
+    with pytest.raises(PipelineError, match="base approval.*direct input"):
+        approve_gate(store, project.id, "directions", [directions.id])
+
+
+def test_gate_rehashes_predecessor_artifact_bytes_before_approval(tmp_path) -> None:
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig())
+    source = store.put_artifact(
+        project.id,
+        b"identity",
+        kind="input",
+        media_type="image/png",
+        variant="raw",
+    )
+    snapped = _base_snap(store, project.id, source.id, b"base")
+    directions = _directions(store, project.id, snapped, b"directions")
+    approve_gate(store, project.id, "base", [snapped.id])
+    store.get_artifact(project.id, snapped.id).write_bytes(b"tampered")
+
+    with pytest.raises(PipelineError, match="base approval.*hash does not match"):
+        approve_gate(store, project.id, "directions", [directions.id])

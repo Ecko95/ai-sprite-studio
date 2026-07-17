@@ -100,7 +100,7 @@ def put_stage_artifact(
 def validate_stage_inputs(
     project: ProjectConfig, stage_key: str, dependencies: Iterable[UUID | str]
 ) -> tuple[ArtifactRef, ...]:
-    """Validate the direct, live artifact inputs for a canonical stage."""
+    """Validate a canonical stage's direct inputs and canonical ancestry."""
 
     if not isinstance(project, ProjectConfig):
         raise PipelineError("project must be a ProjectConfig")
@@ -108,8 +108,18 @@ def validate_stage_inputs(
         raise PipelineError("unknown pipeline stage")
     dependency_ids = _input_ids(dependencies)
     artifacts = {artifact.id: artifact for artifact in project.artifacts}
+    inputs = _direct_stage_inputs(stage_key, dependency_ids, artifacts)
+    _validate_canonical_lineage(artifacts, inputs)
+    return inputs
+
+
+def _direct_stage_inputs(
+    stage_key: str,
+    dependency_ids: Iterable[UUID | str],
+    artifacts: dict[UUID, ArtifactRef],
+) -> tuple[ArtifactRef, ...]:
     inputs: list[ArtifactRef] = []
-    for artifact_id in dependency_ids:
+    for artifact_id in _input_ids(dependency_ids):
         artifact = artifacts.get(artifact_id)
         if artifact is None:
             raise PipelineError("unknown input artifact")
@@ -121,6 +131,31 @@ def validate_stage_inputs(
     if input_kinds not in _STAGE_INPUTS[stage_key]:
         raise PipelineError("stage has wrong or missing direct input dependencies")
     return tuple(inputs)
+
+
+def _validate_canonical_lineage(
+    artifacts: dict[UUID, ArtifactRef],
+    inputs: Iterable[ArtifactRef],
+    *,
+    visiting: set[UUID] | None = None,
+    checked: set[UUID] | None = None,
+) -> None:
+    visiting = set() if visiting is None else visiting
+    checked = set() if checked is None else checked
+    for artifact in inputs:
+        if artifact.kind not in STAGES or artifact.id in checked:
+            continue
+        if artifact.id in visiting:
+            raise PipelineError("canonical artifact lineage contains a cycle")
+        visiting.add(artifact.id)
+        try:
+            ancestors = _direct_stage_inputs(artifact.kind, artifact.dependencies, artifacts)
+            _validate_canonical_lineage(
+                artifacts, ancestors, visiting=visiting, checked=checked
+            )
+            checked.add(artifact.id)
+        finally:
+            visiting.remove(artifact.id)
 
 
 def approve_gate(
@@ -146,18 +181,12 @@ def approve_gate(
         approval = _stored_approval(project, predecessor)
         if approval is None:
             raise PipelineError(f"{predecessor} approval is required")
-        _validate_stored_approval(project, predecessor, approval)
+        _validate_stored_approval(store, project, predecessor, approval)
     previous = _stored_approval(project, gate)
     if previous is not None:
         _validate_approval_hashes(project, previous, require_live=False)
-        if set(previous.artifact_ids) == set(selected_ids):
+        if previous.artifact_ids == selected_ids:
             return store.approve(project.id, gate, previous.artifact_ids, note=note)
-        removed_ids = [artifact_id for artifact_id in previous.artifact_ids if artifact_id not in selected_ids]
-        if not removed_ids:
-            return store.approve(project.id, gate, selected_ids, note=note)
-        stale_ids = _descendant_ids(project, removed_ids)
-        if stale_ids.intersection(selected_ids):
-            raise PipelineError("replacement approval depends on its prior selection")
         return store.replace_approval_and_invalidate_dependants(
             project.id,
             gate,
@@ -257,12 +286,19 @@ def _validate_gate_artifacts(
 
 
 def _validate_stored_approval(
-    project: ProjectConfig, gate: str, approval: Approval
+    store: ProjectStore, project: ProjectConfig, gate: str, approval: Approval
 ) -> None:
     if approval.gate != gate:
         raise PipelineError(f"{gate} approval has the wrong gate")
     _validate_gate_artifacts(project, gate, approval.artifact_ids)
     _validate_approval_hashes(project, approval, require_live=True)
+    for artifact_id in approval.artifact_ids:
+        try:
+            store.verify_artifact(project.id, artifact_id)
+        except ProjectStoreError as exc:
+            raise PipelineError(
+                f"{gate} approval hash does not match its artifact"
+            ) from exc
 
 
 def _validate_approval_hashes(
@@ -279,22 +315,6 @@ def _validate_approval_hashes(
         current_hashes.append(artifact.sha256)
     if approval.artifact_hashes != current_hashes:
         raise PipelineError(f"{approval.gate} approval hash does not match its artifact")
-
-
-def _descendant_ids(project: ProjectConfig, roots: Iterable[UUID]) -> set[UUID]:
-    changed = set(roots)
-    invalidated: set[UUID] = set()
-    frontier = set(changed)
-    while frontier:
-        descendants = {
-            artifact.id
-            for artifact in project.artifacts
-            if artifact.id not in changed | invalidated
-            and any(dependency in frontier for dependency in artifact.dependencies)
-        }
-        invalidated.update(descendants)
-        frontier = descendants
-    return invalidated
 
 
 def _selected_states(

@@ -82,14 +82,15 @@ class ProjectStore:
     def save(self, project: ProjectConfig) -> ProjectConfig:
         project = self._validate_project(project)
         with self._project_fd(project.id) as project_fd:
-            current = self._load_at(project_fd, project.id)
-            if project.artifacts != current.artifacts or project.approvals != current.approvals:
-                raise ProjectStoreError("artifacts and approvals are managed by ProjectStore")
-            saved = project.model_copy(
-                update={"created_at": current.created_at, "updated_at": self._now()}
-            )
-            self._write_project_at(project_fd, saved)
-            return saved
+            with self._project_mutation_lock(project_fd):
+                current = self._load_at(project_fd, project.id)
+                if project.artifacts != current.artifacts or project.approvals != current.approvals:
+                    raise ProjectStoreError("artifacts and approvals are managed by ProjectStore")
+                saved = project.model_copy(
+                    update={"created_at": current.created_at, "updated_at": self._now()}
+                )
+                self._write_project_at(project_fd, saved)
+                return saved
 
     def put_artifact(
         self,
@@ -139,6 +140,19 @@ class ProjectStore:
             self._read_artifact_at(project_fd, artifact, digest=False)
             return self.projects.joinpath(str(project_id), *self._relative_parts(artifact.relative_path))
 
+    def verify_artifact(self, project_id: UUID | str, artifact_id: UUID | str) -> ArtifactRef:
+        """Rehash one stored artifact through its pinned project descriptor."""
+
+        project_id = self._uuid(project_id, "project ID")
+        artifact_id = self._uuid(artifact_id, "artifact ID")
+        with self._project_fd(project_id) as project_fd:
+            project = self._load_at(project_fd, project_id)
+            artifact = next((item for item in project.artifacts if item.id == artifact_id), None)
+            if artifact is None:
+                raise ProjectStoreError("unknown artifact")
+            self._read_artifact_at(project_fd, artifact, digest=True)
+            return artifact
+
     def approve(
         self,
         project_id: UUID | str,
@@ -149,24 +163,25 @@ class ProjectStore:
     ) -> Approval:
         project_id = self._uuid(project_id, "project ID")
         with self._project_fd(project_id) as project_fd:
-            project = self._load_at(project_fd, project_id)
-            approval = self._approval_for(gate, artifact_ids, note)
-            artifacts = {artifact.id: artifact for artifact in project.artifacts}
-            current_hashes = self._approval_hashes_at(project_fd, approval, artifacts)
-            if isinstance(gate, Approval):
-                if approval.artifact_hashes != current_hashes:
-                    raise ProjectStoreError("approval hashes do not match current artifacts")
-            else:
-                approval = approval.model_copy(update={"artifact_hashes": current_hashes})
-            updated = project.model_copy(
-                update={
-                    "approvals": [item for item in project.approvals if item.gate != approval.gate]
-                    + [approval],
-                    "updated_at": self._now(),
-                }
-            )
-            self._write_project_at(project_fd, updated)
-            return approval
+            with self._project_mutation_lock(project_fd):
+                project = self._load_at(project_fd, project_id)
+                approval = self._approval_for(gate, artifact_ids, note)
+                artifacts = {artifact.id: artifact for artifact in project.artifacts}
+                current_hashes = self._approval_hashes_at(project_fd, approval, artifacts)
+                if isinstance(gate, Approval):
+                    if approval.artifact_hashes != current_hashes:
+                        raise ProjectStoreError("approval hashes do not match current artifacts")
+                else:
+                    approval = approval.model_copy(update={"artifact_hashes": current_hashes})
+                updated = project.model_copy(
+                    update={
+                        "approvals": [item for item in project.approvals if item.gate != approval.gate]
+                        + [approval],
+                        "updated_at": self._now(),
+                    }
+                )
+                self._write_project_at(project_fd, updated)
+                return approval
 
     def replace_approval_and_invalidate_dependants(
         self,
@@ -186,51 +201,51 @@ class ProjectStore:
         if not isinstance(note, str):
             raise ProjectStoreError("approval note must be text")
         with self._project_fd(project_id) as project_fd:
-            project = self._load_at(project_fd, project_id)
-            previous = next((item for item in project.approvals if item.gate == gate), None)
-            if previous is None:
-                raise ProjectStoreError("approval to replace does not exist")
-            if set(previous.artifact_ids) != set(expected_ids):
-                raise ProjectStoreError("approval changed before replacement")
+            with self._project_mutation_lock(project_fd):
+                project = self._load_at(project_fd, project_id)
+                previous = next((item for item in project.approvals if item.gate == gate), None)
+                if previous is None:
+                    raise ProjectStoreError("approval to replace does not exist")
+                if set(previous.artifact_ids) != set(expected_ids):
+                    raise ProjectStoreError("approval changed before replacement")
 
-            approval = self._approval_for(gate, artifact_ids, note)
-            removed_ids = [
-                artifact_id
-                for artifact_id in previous.artifact_ids
-                if artifact_id not in approval.artifact_ids
-            ]
-            if not removed_ids:
-                raise ProjectStoreError("approval replacement must remove an artifact")
-            artifacts = {artifact.id: artifact for artifact in project.artifacts}
-            hashes = self._approval_hashes_at(project_fd, approval, artifacts)
-            approval = approval.model_copy(update={"artifact_hashes": hashes})
+                approval = self._approval_for(gate, artifact_ids, note)
+                removed_ids = [
+                    artifact_id
+                    for artifact_id in previous.artifact_ids
+                    if artifact_id not in approval.artifact_ids
+                ]
+                artifacts = {artifact.id: artifact for artifact in project.artifacts}
+                hashes = self._approval_hashes_at(project_fd, approval, artifacts)
+                approval = approval.model_copy(update={"artifact_hashes": hashes})
 
-            invalidated, stale_project = self._invalidate(project, removed_ids)
-            if set(invalidated).intersection(approval.artifact_ids):
-                raise ProjectStoreError("replacement approval depends on a removed artifact")
-            updated_project = stale_project or project
-            updated = updated_project.model_copy(
-                update={
-                    "approvals": [
-                        item for item in updated_project.approvals if item.gate != approval.gate
-                    ]
-                    + [approval],
-                    "updated_at": self._now(),
-                }
-            )
-            self._write_project_at(project_fd, updated)
-            return approval
+                invalidated, stale_project = self._invalidate(project, removed_ids)
+                if set(invalidated).intersection(approval.artifact_ids):
+                    raise ProjectStoreError("replacement approval depends on a removed artifact")
+                updated_project = stale_project or project
+                updated = updated_project.model_copy(
+                    update={
+                        "approvals": [
+                            item for item in updated_project.approvals if item.gate != approval.gate
+                        ]
+                        + [approval],
+                        "updated_at": self._now(),
+                    }
+                )
+                self._write_project_at(project_fd, updated)
+                return approval
 
     def invalidate_dependants(
         self, project_id: UUID | str, artifact_ids: Iterable[UUID | str]
     ) -> list[UUID]:
         project_id = self._uuid(project_id, "project ID")
         with self._project_fd(project_id) as project_fd:
-            project = self._load_at(project_fd, project_id)
-            ordered, updated = self._invalidate(project, artifact_ids)
-            if updated is not None:
-                self._write_project_at(project_fd, updated)
-            return ordered
+            with self._project_mutation_lock(project_fd):
+                project = self._load_at(project_fd, project_id)
+                ordered, updated = self._invalidate(project, artifact_ids)
+                if updated is not None:
+                    self._write_project_at(project_fd, updated)
+                return ordered
 
     def list_projects(self) -> list[ProjectConfig]:
         try:
@@ -449,6 +464,33 @@ class ProjectStore:
                 yield descriptor
             finally:
                 os.close(descriptor)
+
+    @contextmanager
+    def _project_mutation_lock(self, project_fd: int) -> Iterator[None]:
+        descriptor = -1
+        locked = False
+        try:
+            try:
+                descriptor = os.open(
+                    ".project.lock",
+                    os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=project_fd,
+                )
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    raise ProjectStoreError("could not lock project mutation")
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                locked = True
+            except OSError as exc:
+                raise ProjectStoreError("could not lock project mutation") from exc
+            yield
+        finally:
+            if descriptor >= 0:
+                try:
+                    if locked:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                finally:
+                    os.close(descriptor)
 
     @classmethod
     def _open_directory_at(
@@ -792,65 +834,69 @@ class ProjectStore:
         dependency_ids: list[UUID],
     ) -> ArtifactRef:
         with self._project_fd(project_id) as project_fd:
-            project = self._load_at(project_fd, project_id)
-            artifacts = {artifact.id: artifact for artifact in project.artifacts}
-            if any(item not in artifacts for item in dependency_ids):
-                raise ProjectStoreError("unknown dependency artifact")
-            if any(artifacts[item].stale for item in dependency_ids):
-                raise ProjectStoreError("stale dependency artifact")
-            known_ids = set(artifacts)
-            extension = self._extension_for(media_type)
-            stage_name = None if kind == "input" else self._safe_component(stage or kind, "stage")
+            with self._project_mutation_lock(project_fd):
+                project = self._load_at(project_fd, project_id)
+                artifacts = {artifact.id: artifact for artifact in project.artifacts}
+                if any(item not in artifacts for item in dependency_ids):
+                    raise ProjectStoreError("unknown dependency artifact")
+                if any(artifacts[item].stale for item in dependency_ids):
+                    raise ProjectStoreError("stale dependency artifact")
+                known_ids = set(artifacts)
+                extension = self._extension_for(media_type)
+                stage_name = None if kind == "input" else self._safe_component(stage or kind, "stage")
 
-            for _ in range(16):
-                artifact_id = uuid4()
-                if artifact_id in known_ids:
-                    continue
-                relative_path = (
-                    f"inputs/{artifact_id}.{extension}"
-                    if stage_name is None
-                    else f"candidates/{stage_name}/{artifact_id}/{variant}.{extension}"
-                )
-                try:
-                    artifact = ArtifactRef(
-                        id=artifact_id,
-                        kind=kind,
-                        relative_path=relative_path,
-                        sha256=hashlib.sha256(data).hexdigest(),
-                        media_type=media_type,
-                        width=width,
-                        height=height,
-                        variant=variant,
-                        source_job_id=source_job_id,
-                        dependencies=dependency_ids,
-                    )
-                except ValidationError as exc:
-                    raise ProjectStoreError(f"invalid artifact: {exc}") from exc
-
-                updated = project.model_copy(
-                    update={"artifacts": [*project.artifacts, artifact], "updated_at": self._now()}
-                )
-                with self._parent_fd_at(project_fd, relative_path, create=True) as (parent_fd, name):
-                    if self._entry_exists_at(parent_fd, name):
+                for _ in range(16):
+                    artifact_id = uuid4()
+                    if artifact_id in known_ids:
                         continue
+                    relative_path = (
+                        f"inputs/{artifact_id}.{extension}"
+                        if stage_name is None
+                        else f"candidates/{stage_name}/{artifact_id}/{variant}.{extension}"
+                    )
                     try:
-                        self._atomic_write_at(parent_fd, name, data, overwrite=False)
-                    except _WriteFailure as exc:
-                        if exc.collision:
-                            continue
-                        if exc.published:
-                            self._remove_entry_at(parent_fd, name)
-                        raise
+                        artifact = ArtifactRef(
+                            id=artifact_id,
+                            kind=kind,
+                            relative_path=relative_path,
+                            sha256=hashlib.sha256(data).hexdigest(),
+                            media_type=media_type,
+                            width=width,
+                            height=height,
+                            variant=variant,
+                            source_job_id=source_job_id,
+                            dependencies=dependency_ids,
+                        )
+                    except ValidationError as exc:
+                        raise ProjectStoreError(f"invalid artifact: {exc}") from exc
 
-                    try:
-                        self._write_project_at(project_fd, updated)
-                    except _WriteFailure as exc:
-                        # Only remove the candidate when we know project.json
-                        # did not cross its rename publication point.
-                        if not exc.published:
-                            self._remove_entry_at(parent_fd, name)
-                        raise
-                return artifact
+                    updated = project.model_copy(
+                        update={"artifacts": [*project.artifacts, artifact], "updated_at": self._now()}
+                    )
+                    with self._parent_fd_at(project_fd, relative_path, create=True) as (
+                        parent_fd,
+                        name,
+                    ):
+                        if self._entry_exists_at(parent_fd, name):
+                            continue
+                        try:
+                            self._atomic_write_at(parent_fd, name, data, overwrite=False)
+                        except _WriteFailure as exc:
+                            if exc.collision:
+                                continue
+                            if exc.published:
+                                self._remove_entry_at(parent_fd, name)
+                            raise
+
+                        try:
+                            self._write_project_at(project_fd, updated)
+                        except _WriteFailure as exc:
+                            # Only remove the candidate when we know project.json
+                            # did not cross its rename publication point.
+                            if not exc.published:
+                                self._remove_entry_at(parent_fd, name)
+                            raise
+                    return artifact
         raise ProjectStoreError("could not allocate a unique artifact ID")
 
     def _write_project_at(self, project_fd: int, project: ProjectConfig) -> None:
