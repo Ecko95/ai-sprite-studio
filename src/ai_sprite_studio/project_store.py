@@ -16,6 +16,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import secrets
@@ -251,6 +252,34 @@ class ProjectStore:
         with self._project_fd(project_id) as project_fd:
             with self._opened_directory_at(project_fd, "jobs", label="jobs") as jobs_fd:
                 return self._load_job_at(jobs_fd, project_id, job_id)
+
+    def save_prompt(
+        self, project_id: UUID | str, job_id: UUID | str, record: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Atomically save one immutable JSON prompt record for a job."""
+
+        project_id = self._uuid(project_id, "project ID")
+        job_id = self._uuid(job_id, "job ID")
+        encoded = self._prompt_json(record)
+        with self._project_fd(project_id) as project_fd:
+            self._load_at(project_fd, project_id)
+            with self._opened_directory_at(project_fd, "prompts", label="prompts") as prompts_fd:
+                self._atomic_write_at(prompts_fd, f"{job_id}.json", encoded, overwrite=False)
+        return json.loads(encoded)
+
+    def load_prompt(self, project_id: UUID | str, job_id: UUID | str) -> dict[str, Any]:
+        """Load one validated immutable JSON prompt record for a job."""
+
+        project_id = self._uuid(project_id, "project ID")
+        job_id = self._uuid(job_id, "job ID")
+        with self._project_fd(project_id) as project_fd:
+            with self._opened_directory_at(project_fd, "prompts", label="prompts") as prompts_fd:
+                try:
+                    record = json.loads(self._read_file_at(prompts_fd, f"{job_id}.json"))
+                except (ProjectStoreError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ProjectStoreError("malformed prompt JSON") from exc
+        self._prompt_json(record)
+        return record
 
     def list_jobs(self, project_id: UUID | str) -> list[JobRecord]:
         project_id = self._uuid(project_id, "project ID")
@@ -938,6 +967,55 @@ class ProjectStore:
             ).encode("utf-8")
             + b"\n"
         )
+
+    @classmethod
+    def _prompt_json(cls, record: dict[str, Any]) -> bytes:
+        if not isinstance(record, dict):
+            raise ProjectStoreError("prompt record must be a JSON object")
+        try:
+            cls._validate_json_value(record, set())
+            encoded = json.dumps(
+                record,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+                allow_nan=False,
+            ).encode("utf-8")
+        except (RecursionError, TypeError, ValueError) as exc:
+            raise ProjectStoreError("prompt record must contain safe JSON values") from exc
+        return encoded + b"\n"
+
+    @classmethod
+    def _validate_json_value(cls, value: Any, seen: set[int]) -> None:
+        if value is None or isinstance(value, (str, bool, int)):
+            return
+        if isinstance(value, float):
+            if math.isfinite(value):
+                return
+            raise ValueError("non-finite JSON number")
+        if isinstance(value, list):
+            if id(value) in seen:
+                raise ValueError("recursive JSON value")
+            seen.add(id(value))
+            try:
+                for item in value:
+                    cls._validate_json_value(item, seen)
+            finally:
+                seen.remove(id(value))
+            return
+        if isinstance(value, dict):
+            if id(value) in seen:
+                raise ValueError("recursive JSON value")
+            seen.add(id(value))
+            try:
+                for key, item in value.items():
+                    if not isinstance(key, str):
+                        raise ValueError("JSON object key is not a string")
+                    cls._validate_json_value(item, seen)
+            finally:
+                seen.remove(id(value))
+            return
+        raise TypeError("not a JSON value")
 
     @staticmethod
     def _validate_project(project: ProjectConfig) -> ProjectConfig:
