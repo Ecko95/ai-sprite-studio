@@ -342,6 +342,116 @@ async def test_event_stream_replays_only_its_job_and_skips_unrelated_wakes(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_event_stream_rescans_after_a_replayed_event_before_terminal_close(tmp_path):
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig(name="Terminal replay ranger"))
+    running = JobRecord(
+        id=uuid4(),
+        project_id=project.id,
+        command=JobCommand.RUN_QA,
+        status="running",
+        payload={},
+        input_hash="a" * 64,
+        provider_request_ids=[],
+        output_artifact_ids=[],
+        progress=0,
+        error=None,
+    )
+    store.save_job(running)
+    store.append_job_event(project.id, "job", running.model_dump(mode="json"))
+
+    runner = JobRunner(store)
+    stream = runner.event_stream(running.id)
+    try:
+        replayed = await anext(stream)
+
+        completed = running.model_copy(update={"status": "succeeded", "progress": 1})
+        store.save_job(completed)
+        await runner._emit(completed)
+
+        terminal = await anext(stream)
+
+        assert replayed["data"]["status"] == "running"
+        assert terminal["id"] == 2
+        assert terminal["data"]["status"] == "succeeded"
+        with pytest.raises(StopAsyncIteration):
+            await anext(stream)
+    finally:
+        await stream.aclose()
+        await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_event_stream_repairs_a_transient_nonterminal_event_write_while_waiting(
+    tmp_path, monkeypatch
+):
+    class TrackingCondition(asyncio.Condition):
+        def __init__(self):
+            super().__init__()
+            self.waiting = asyncio.Event()
+            self.woke = asyncio.Event()
+
+        async def wait_for(self, predicate):
+            self.waiting.set()
+            while not predicate():
+                await self.wait()
+                self.woke.set()
+            return True
+
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig(name="Live repair ranger"))
+    running = JobRecord(
+        id=uuid4(),
+        project_id=project.id,
+        command=JobCommand.RUN_QA,
+        status="running",
+        payload={},
+        input_hash="a" * 64,
+        provider_request_ids=[],
+        output_artifact_ids=[],
+        progress=0,
+        error=None,
+    )
+    store.save_job(running)
+    store.append_job_event(project.id, "job", running.model_dump(mode="json"))
+
+    runner = JobRunner(store)
+    condition = TrackingCondition()
+    runner._events_changed = condition
+    stream = runner.event_stream(running.id)
+    pending = None
+    try:
+        assert (await anext(stream))["id"] == 1
+        pending = asyncio.create_task(anext(stream))
+        await asyncio.wait_for(condition.waiting.wait(), timeout=1)
+
+        original_append = store.append_job_event
+        failed = False
+
+        def fail_once(project_id, event, data):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise ProjectStoreError("transient event write failure")
+            return original_append(project_id, event, data)
+
+        monkeypatch.setattr(store, "append_job_event", fail_once)
+        await runner.update(running.id, progress=0.5)
+        await asyncio.wait_for(condition.woke.wait(), timeout=1)
+
+        repaired = await asyncio.wait_for(pending, timeout=1)
+        assert repaired["id"] == 2
+        assert repaired["data"]["progress"] == 0.5
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            with suppress(asyncio.CancelledError):
+                await pending
+        await stream.aclose()
+        await runner.aclose()
+
+
+@pytest.mark.asyncio
 async def test_runner_exclusively_locks_its_workspace_for_its_lifetime(tmp_path):
     first = JobRunner(ProjectStore(tmp_path))
     second = JobRunner(ProjectStore(tmp_path))

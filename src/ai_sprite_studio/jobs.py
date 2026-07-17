@@ -24,6 +24,7 @@ class JobRunner:
         self._projects: dict[UUID, UUID] = {}
         self._cancellations: dict[UUID, asyncio.Event] = {}
         self._events_changed = asyncio.Condition()
+        self._events_version = 0
         self._worker_task: asyncio.Task[None] | None = None
         self._runner_lock_fd: int | None = None
         self._started = False
@@ -131,26 +132,35 @@ class JobRunner:
     ) -> AsyncIterator[dict[str, Any]]:
         job = await self.get(job_id)
         last_id = after_id
+        observed_version = self._events_version
         while True:
             current = self.store.load_job(job.project_id, job.id)
-            await self._reconcile_event(current)
+            await self._reconcile_event(current, notify_on_failure=False)
             events = self.store.job_events(job.project_id, after_id=last_id)
             for event in events:
                 last_id = event["id"]
                 if self._is_job_event(event, job.id):
                     yield event
-            current = self.store.load_job(job.project_id, job.id)
-            if current.status in {"succeeded", "failed", "canceled", "attention_required"}:
-                return
-            async with self._events_changed:
-                await self._events_changed.wait_for(
-                    lambda: any(
-                        self._is_job_event(event, job.id)
-                        for event in self.store.job_events(job.project_id, after_id=last_id)
+                    break
+            else:
+                current = self.store.load_job(job.project_id, job.id)
+                if current.status in {"succeeded", "failed", "canceled", "attention_required"}:
+                    return
+                async with self._events_changed:
+                    if self._events_version != observed_version:
+                        observed_version = self._events_version
+                        continue
+                    await self._events_changed.wait_for(
+                        lambda: self._events_version != observed_version
+                        or any(
+                            self._is_job_event(event, job.id)
+                            for event in self.store.job_events(job.project_id, after_id=last_id)
+                        )
+                        or self.store.load_job(job.project_id, job.id).status
+                        in {"succeeded", "failed", "canceled", "attention_required"}
                     )
-                    or self.store.load_job(job.project_id, job.id).status
-                    in {"succeeded", "failed", "canceled", "attention_required"}
-                )
+                    observed_version = self._events_version
+                continue
 
     async def update(
         self,
@@ -243,7 +253,7 @@ class JobRunner:
             await self._notify_events_changed()
         return saved
 
-    async def _reconcile_event(self, job: JobRecord) -> None:
+    async def _reconcile_event(self, job: JobRecord, *, notify_on_failure: bool = True) -> None:
         expected = job.model_dump(mode="json")
         latest = next(
             (
@@ -258,7 +268,8 @@ class JobRunner:
         try:
             await self._emit(job)
         except ProjectStoreError:
-            await self._notify_events_changed()
+            if notify_on_failure:
+                await self._notify_events_changed()
 
     async def _emit(self, job: JobRecord) -> None:
         self.store.append_job_event(job.project_id, "job", job.model_dump(mode="json"))
@@ -266,6 +277,7 @@ class JobRunner:
 
     async def _notify_events_changed(self) -> None:
         async with self._events_changed:
+            self._events_version += 1
             self._events_changed.notify_all()
 
     @staticmethod
