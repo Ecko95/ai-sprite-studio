@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 import os
@@ -15,6 +16,9 @@ from uuid import UUID, uuid4
 from pydantic import ValidationError
 
 from .contracts import Approval, ApprovalGate, ArtifactRef, ArtifactVariant, ProjectConfig
+
+
+_UNSUPPORTED_FSYNC_ERRNOS = {errno.EINVAL, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}
 
 
 class ProjectStoreError(ValueError):
@@ -41,9 +45,12 @@ class ProjectStore:
         try:
             for directory in ("inputs", "candidates", "run", "videos", "prompts", "jobs", "exports"):
                 (staging / directory).mkdir()
-            self._atomic_write(staging / "events.ndjson", b"", overwrite=False)
-            self._atomic_write(staging / "project.json", payload, overwrite=False)
+            self._atomic_write(staging, staging / "events.ndjson", b"", overwrite=False)
+            self._atomic_write(staging, staging / "project.json", payload, overwrite=False)
+            self._contained(staging, projects_root)
+            self._contained(target.parent, projects_root)
             os.replace(staging, target)
+            self._fsync_directory(projects_root)
         except OSError as exc:
             raise ProjectStoreError(f"could not create project: {exc}") from exc
         finally:
@@ -96,6 +103,8 @@ class ProjectStore:
     ) -> ArtifactRef:
         if not isinstance(data, bytes):
             raise ProjectStoreError("artifact data must be bytes")
+        if not isinstance(media_type, str) or not media_type.strip():
+            raise ProjectStoreError("media type must be a non-empty string")
         project_id = self._uuid(project_id, "project ID")
         project = self.load(project_id)
         root = self._project_root(project_id)
@@ -106,13 +115,25 @@ class ProjectStore:
         if any(item not in known_ids for item in dependency_ids):
             raise ProjectStoreError("unknown dependency artifact")
 
-        artifact_id = uuid4()
         extension = self._extension_for(media_type)
         if kind == "input":
-            relative_path = f"inputs/{artifact_id}.{extension}"
+            stage_name = None
         else:
             stage_name = self._safe_component(stage or kind, "stage")
-            relative_path = f"candidates/{stage_name}/{artifact_id}/{variant}.{extension}"
+        for _ in range(16):
+            artifact_id = uuid4()
+            if artifact_id in known_ids:
+                continue
+            relative_path = (
+                f"inputs/{artifact_id}.{extension}"
+                if stage_name is None
+                else f"candidates/{stage_name}/{artifact_id}/{variant}.{extension}"
+            )
+            artifact_path = self._safe_path(root, relative_path)
+            if not os.path.lexists(artifact_path):
+                break
+        else:
+            raise ProjectStoreError("could not allocate a unique artifact ID")
         try:
             artifact = ArtifactRef(
                 id=artifact_id,
@@ -129,18 +150,19 @@ class ProjectStore:
         except ValidationError as exc:
             raise ProjectStoreError(f"invalid artifact: {exc}") from exc
 
-        artifact_path = self._safe_path(root, artifact.relative_path)
         project_path = self._safe_path(root, "project.json", require_exists=True)
-        if os.path.lexists(artifact_path):
-            raise ProjectStoreError("candidate artifact already exists")
         updated = project.model_copy(
             update={"artifacts": [*project.artifacts, artifact], "updated_at": self._now()}
         )
         payload = self._project_json(updated)
         # Both destinations have been validated before either file is changed.
         self._ensure_parent(root, artifact_path)
-        self._atomic_write(artifact_path, data, overwrite=False)
-        self._atomic_write(project_path, payload, overwrite=True)
+        try:
+            self._atomic_write(root, artifact_path, data, overwrite=False)
+            self._atomic_write(root, project_path, payload, overwrite=True)
+        except Exception:
+            self._remove_new_artifact(root, artifact_path)
+            raise
         return artifact
 
     def get_artifact(self, project_id: UUID | str, artifact_id: UUID | str) -> Path:
@@ -252,6 +274,10 @@ class ProjectStore:
             raise ProjectStoreError(f"could not create workspace: {exc}") from exc
         if not root.is_dir():
             raise ProjectStoreError("workspace projects path is not a directory")
+        try:
+            root.relative_to(self.workspace)
+        except ValueError as exc:
+            raise ProjectStoreError("workspace projects path resolves outside workspace") from exc
         return root
 
     def _project_root(self, project_id: UUID) -> Path:
@@ -264,6 +290,7 @@ class ProjectStore:
 
     def _write_project(self, root: Path, project: ProjectConfig) -> None:
         self._atomic_write(
+            root,
             self._safe_path(root, "project.json", require_exists=True),
             self._project_json(project),
             overwrite=True,
@@ -303,6 +330,7 @@ class ProjectStore:
         path = cls._safe_path(root, artifact.relative_path, require_exists=True)
         if not path.is_file():
             raise ProjectStoreError("stored artifact is not a file")
+        cls._contained(path, root)
         return path
 
     @classmethod
@@ -310,11 +338,13 @@ class ProjectStore:
         path = cls._artifact_path(root, artifact)
         digest = hashlib.sha256()
         try:
-            with path.open("rb") as file:
+            cls._contained(path, root)
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            with os.fdopen(os.open(path, flags), "rb") as file:
                 for chunk in iter(lambda: file.read(1024 * 1024), b""):
                     digest.update(chunk)
-        except OSError as exc:
-            raise ProjectStoreError("could not read artifact") from exc
+        except (OSError, ProjectStoreError) as exc:
+            raise ProjectStoreError("could not safely read artifact") from exc
         value = digest.hexdigest()
         if value != artifact.sha256:
             raise ProjectStoreError("artifact hash does not match its record")
@@ -329,26 +359,65 @@ class ProjectStore:
             raise ProjectStoreError(f"could not prepare artifact directory: {exc}") from exc
         cls._contained(target.parent, root)
 
-    @staticmethod
-    def _atomic_write(target: Path, data: bytes, *, overwrite: bool) -> None:
+    @classmethod
+    def _atomic_write(cls, root: Path, target: Path, data: bytes, *, overwrite: bool) -> None:
+        cls._contained(target.parent, root)
         if not overwrite and os.path.lexists(target):
             raise ProjectStoreError("refusing to overwrite an immutable candidate")
-        descriptor, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+        try:
+            descriptor, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+        except OSError as exc:
+            raise ProjectStoreError(f"could not create temporary storage file: {exc}") from exc
         temporary_path = Path(temporary)
         try:
             with os.fdopen(descriptor, "wb") as file:
+                cls._contained(temporary_path.parent, root)
+                cls._contained(target.parent, root)
                 file.write(data)
                 file.flush()
-                try:
-                    os.fsync(file.fileno())
-                except OSError:
-                    pass
+                cls._fsync(file.fileno())
             if not overwrite and os.path.lexists(target):
                 raise ProjectStoreError("refusing to overwrite an immutable candidate")
-            os.replace(temporary_path, target)
+            cls._contained(target.parent, root)
+            try:
+                os.replace(temporary_path, target)
+            except OSError as exc:
+                raise ProjectStoreError(f"could not replace storage file: {exc}") from exc
+            cls._fsync_directory(target.parent)
         finally:
             if temporary_path.exists():
                 temporary_path.unlink()
+
+    @classmethod
+    def _remove_new_artifact(cls, root: Path, path: Path) -> None:
+        cls._contained(path.parent, root)
+        try:
+            if os.path.lexists(path):
+                path.unlink()
+                cls._fsync_directory(path.parent)
+        except OSError as exc:
+            raise ProjectStoreError(f"could not roll back artifact: {exc}") from exc
+
+    @staticmethod
+    def _fsync(descriptor: int) -> None:
+        try:
+            os.fsync(descriptor)
+        except OSError as exc:
+            if exc.errno not in _UNSUPPORTED_FSYNC_ERRNOS:
+                raise ProjectStoreError(f"could not fsync storage: {exc}") from exc
+
+    @classmethod
+    def _fsync_directory(cls, directory: Path) -> None:
+        if not hasattr(os, "O_DIRECTORY"):
+            return
+        try:
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        except OSError as exc:
+            raise ProjectStoreError(f"could not open storage directory for fsync: {exc}") from exc
+        try:
+            cls._fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     @staticmethod
     def _extension_for(media_type: str) -> str:

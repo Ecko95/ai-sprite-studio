@@ -1,7 +1,9 @@
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
+import tempfile
 from uuid import uuid4
 
 import pytest
@@ -73,6 +75,86 @@ def test_save_atomically_replaces_project_json_without_temp_residue(store, tmp_p
     assert not list(project_path.parent.glob(".project.json.*"))
 
 
+def test_atomic_save_fsyncs_temp_then_parent_after_replace(store, monkeypatch):
+    project = _project(store)
+    events = []
+    real_replace = os.replace
+
+    def record_fsync(_descriptor):
+        events.append("fsync")
+
+    def record_replace(source, destination):
+        events.append("replace")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("ai_sprite_studio.project_store.os.fsync", record_fsync)
+    monkeypatch.setattr("ai_sprite_studio.project_store.os.replace", record_replace)
+    project.name = "Durable ranger"
+    store.save(project)
+
+    assert events == ["fsync", "replace", "fsync"]
+
+
+def test_create_fsyncs_projects_root_after_publishing_staged_directory(tmp_path, monkeypatch):
+    events = []
+    real_replace = os.replace
+
+    def record_fsync(_descriptor):
+        events.append("fsync")
+
+    def record_replace(source, destination):
+        events.append(("replace", Path(destination)))
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("ai_sprite_studio.project_store.os.fsync", record_fsync)
+    monkeypatch.setattr("ai_sprite_studio.project_store.os.replace", record_replace)
+    project = ProjectStore(tmp_path).create(ProjectConfig(name="Durable ranger"))
+
+    assert events[-2:] == [("replace", tmp_path / "projects" / str(project.id)), "fsync"]
+
+
+def test_atomic_save_tolerates_explicitly_unsupported_fsync_errors(store, monkeypatch):
+    project = _project(store)
+
+    def unsupported_fsync(_descriptor):
+        raise OSError(errno.EINVAL, "unsupported")
+
+    monkeypatch.setattr("ai_sprite_studio.project_store.os.fsync", unsupported_fsync)
+    project.name = "Portable ranger"
+
+    store.save(project)
+
+    assert store.load(project.id).name == "Portable ranger"
+
+
+def test_atomic_save_propagates_supported_fsync_failures(store, monkeypatch):
+    project = _project(store)
+
+    def fail_fsync(_descriptor):
+        raise OSError(errno.EIO, "disk failure")
+
+    monkeypatch.setattr("ai_sprite_studio.project_store.os.fsync", fail_fsync)
+    project.name = "Must not persist"
+
+    with pytest.raises(ProjectStoreError, match="fsync"):
+        store.save(project)
+
+    assert store.load(project.id).name == "Test ranger"
+
+
+def test_projects_root_rejects_a_workspace_escaping_symlink(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    (workspace / "projects").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ProjectStoreError, match="outside workspace"):
+        ProjectStore(workspace).create(ProjectConfig(name="Unsafe ranger"))
+
+    assert not list(outside.iterdir())
+
+
 def test_load_rejects_malformed_json_and_unknown_schema_version(store, tmp_path):
     project = _project(store)
     project_path = tmp_path / "projects" / str(project.id) / "project.json"
@@ -108,6 +190,135 @@ def test_put_artifact_validates_dependencies_before_writing_any_candidate(store,
 
     assert not list(candidate_root.rglob("*"))
     assert store.load(project.id).artifacts == []
+
+
+def test_put_artifact_rejects_non_string_media_type_at_its_public_boundary(store, tmp_path):
+    project = _project(store)
+    candidate_root = tmp_path / "projects" / str(project.id) / "candidates"
+
+    with pytest.raises(ProjectStoreError, match="media type"):
+        store.put_artifact(
+            project.id,
+            b"pixels",
+            kind="candidate",
+            media_type=None,
+            variant="raw",
+        )
+
+    assert not list(candidate_root.rglob("*"))
+
+
+def test_put_artifact_rolls_back_when_manifest_publish_fails(store, tmp_path, monkeypatch):
+    project = _project(store)
+    candidate_root = tmp_path / "projects" / str(project.id) / "candidates"
+    real_replace = os.replace
+
+    def fail_manifest_replace(source, destination):
+        if Path(destination).name == "project.json":
+            raise OSError(errno.EIO, "manifest failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("ai_sprite_studio.project_store.os.replace", fail_manifest_replace)
+
+    with pytest.raises(ProjectStoreError, match="replace"):
+        _artifact(store, project.id)
+
+    assert not [path for path in candidate_root.rglob("*") if path.is_file()]
+    assert store.load(project.id).artifacts == []
+
+
+def test_put_artifact_rolls_back_if_candidate_directory_sync_fails(store, tmp_path, monkeypatch):
+    project = _project(store)
+    candidate_root = tmp_path / "projects" / str(project.id) / "candidates"
+    real_fsync_directory = ProjectStore._fsync_directory
+    calls = 0
+
+    def fail_once(_cls, directory):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ProjectStoreError("candidate directory sync failed")
+        return real_fsync_directory(directory)
+
+    monkeypatch.setattr(ProjectStore, "_fsync_directory", classmethod(fail_once))
+
+    with pytest.raises(ProjectStoreError, match="directory sync"):
+        _artifact(store, project.id)
+
+    assert not [path for path in candidate_root.rglob("*") if path.is_file()]
+    assert store.load(project.id).artifacts == []
+
+
+def test_put_artifact_retries_a_generated_uuid_collision(store, monkeypatch):
+    project = _project(store)
+    existing = _artifact(store, project.id)
+    replacement_id = uuid4()
+    generated = iter([existing.id, replacement_id])
+    monkeypatch.setattr("ai_sprite_studio.project_store.uuid4", lambda: next(generated))
+
+    replacement = _artifact(store, project.id)
+
+    assert replacement.id == replacement_id
+    assert [artifact.id for artifact in store.load(project.id).artifacts] == [
+        existing.id,
+        replacement_id,
+    ]
+
+
+def test_put_artifact_revalidates_a_parent_swapped_to_an_escaping_symlink(
+    store, tmp_path, monkeypatch
+):
+    project = _project(store)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_mkstemp = tempfile.mkstemp
+    swapped = False
+    fsyncs = []
+
+    def swap_parent(*args, **kwargs):
+        nonlocal swapped
+        directory = Path(kwargs["dir"])
+        if not swapped:
+            moved = directory.with_name(f"{directory.name}-moved")
+            directory.rename(moved)
+            directory.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr("ai_sprite_studio.project_store.tempfile.mkstemp", swap_parent)
+    monkeypatch.setattr(
+        ProjectStore,
+        "_fsync",
+        classmethod(lambda _cls, _descriptor: fsyncs.append(_descriptor)),
+    )
+
+    with pytest.raises(ProjectStoreError, match="outside"):
+        _artifact(store, project.id)
+
+    assert fsyncs == []
+    assert not list(outside.iterdir())
+    assert store.load(project.id).artifacts == []
+
+
+def test_live_hash_rejects_an_artifact_swapped_to_a_symlink_after_lookup(
+    store, tmp_path, monkeypatch
+):
+    project = _project(store)
+    artifact = _artifact(store, project.id)
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"pixel bytes")
+    real_artifact_path = ProjectStore._artifact_path
+
+    def swap_artifact(_cls, root, current):
+        path = real_artifact_path(root, current)
+        path.unlink()
+        path.symlink_to(outside)
+        return path
+
+    monkeypatch.setattr(ProjectStore, "_artifact_path", classmethod(swap_artifact))
+
+    with pytest.raises(ProjectStoreError, match="artifact"):
+        store.approve(project.id, "base", [artifact.id])
 
 
 @pytest.mark.parametrize("stage", ["../outside", "C:outside"])
