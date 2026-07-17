@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from functools import wraps
 from io import BytesIO, StringIO
 import json
+from math import isfinite
+import os
 from pathlib import Path, PurePath
 import re
 import tempfile
+from threading import RLock
 from typing import Any
 from uuid import UUID
 import warnings
@@ -25,9 +29,16 @@ from sprite_gen.runio import atomic_write_text, read_guard
 from .contracts import ArtifactRef
 from .project_store import ProjectStore, ProjectStoreError
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - descriptor-backed storage requires Unix
+    fcntl = None
+
 
 MAX_INPUT_BYTES = 20 * 1024 * 1024
 MAX_INPUT_PIXELS = 16_000_000
+# Connected components retain per-region bookkeeping; projection remains explicitly available above this cap.
+MAX_COMPONENT_INPUT_PIXELS = 262_144
 _ENGINE_STATE = "sprite-engine.json"
 _UPLOAD_STATE = "upload"
 _ARTIFACT_STAGE = "sprite_upload"
@@ -37,6 +48,46 @@ _MEDIA_FORMATS = {
     "WEBP": ("image/webp", {".webp"}),
 }
 _ABSOLUTE_PATH = re.compile(r"(?<![\w.-])/(?:[^\s\"']+)")
+_PIXEL_EDIT_COORDINATE = re.compile(r"(0|[1-9]\d*),(0|[1-9]\d*)\Z")
+_CURATION_TRANSFORM_FIELDS = {"rotate", "scale", "dx", "dy", "shx", "shy", "flipX"}
+_ENGINE_MUTATION_LOCK = RLock()
+
+
+@contextmanager
+def _engine_mutation_guard(run_dir: Path):
+    """Serialize this engine's run-state changes across app processes."""
+
+    if fcntl is None:
+        raise RuntimeError("sprite engine mutation lock is unavailable")
+    path = run_dir.parent / f".{run_dir.name}.sprite-engine.lock"
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise RuntimeError("sprite engine mutation lock is unavailable") from exc
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _serialized_engine_mutation(method: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(method)
+    def locked(self: SpriteEngine, project_id: UUID | str, *args: Any, **kwargs: Any) -> Any:
+        try:
+            with _ENGINE_MUTATION_LOCK:
+                run_dir = self.store.run_dir(project_id)
+                with _engine_mutation_guard(run_dir):
+                    return method(self, project_id, *args, **kwargs)
+        except SpriteEngineError:
+            raise
+        except (OSError, RuntimeError, SystemExit) as exc:
+            raise SpriteEngineError("sprite engine operation failed") from exc
+
+    return locked
 
 
 class SpriteEngineError(ProjectStoreError):
@@ -45,6 +96,16 @@ class SpriteEngineError(ProjectStoreError):
     def __init__(self, message: str, *, diagnostics: dict[str, Any] | None = None):
         super().__init__(message)
         self.diagnostics = diagnostics or {}
+
+
+@contextmanager
+def _curation_boundary(operation: str):
+    try:
+        yield
+    except SpriteEngineError:
+        raise
+    except (SystemExit, OSError, RuntimeError, ValueError, KeyError, TypeError, OverflowError) as exc:
+        raise SpriteEngineError(f"sprite {operation} failed") from exc
 
 
 @dataclass(frozen=True)
@@ -123,6 +184,7 @@ class SpriteEngine:
         except ProjectStoreError as exc:
             raise SpriteEngineError("upload could not be stored") from exc
 
+    @_serialized_engine_mutation
     def prepare(
         self,
         project_id: UUID | str,
@@ -193,6 +255,7 @@ class SpriteEngine:
             outputs=(raw_rel(prepared_request, _UPLOAD_STATE), "sprite-request.json"),
         )
 
+    @_serialized_engine_mutation
     def extract(
         self, project_id: UUID | str, *, segmentation: str = "components"
     ) -> ExtractionResult:
@@ -202,6 +265,14 @@ class SpriteEngine:
             raise SpriteEngineError("unsupported sprite segmentation")
         project = self.store.load(project_id)
         run_dir, state = self._prepared_state(project.id)
+        if segmentation == "components":
+            source = self._input_artifact(project.id, self._state_uuid(state, "input_artifact_id"))
+            if (
+                source.width is None
+                or source.height is None
+                or source.width * source.height > MAX_COMPONENT_INPUT_PIXELS
+            ):
+                raise SpriteEngineError("sprite component input is too complex; choose projection explicitly")
         result = self._invoke(
             "extract",
             sprite_extract.run,
@@ -228,13 +299,21 @@ class SpriteEngine:
             raise SpriteEngineError("sprite extraction did not preserve frame twins")
 
         source_id = self._state_uuid(state, "input_artifact_id")
-        plain_ids: list[UUID] = []
-        pixel_ids: list[UUID] = []
+        request_id = self._state_uuid(state, "request_artifact_id")
+        validated_frames: list[tuple[Path, Path]] = []
+        shared_palette: set[tuple[int, int, int]] = set()
         for plain_file, pixel_file in zip(plain_files, files, strict=True):
             plain_path = self._run_file(run_dir, plain_file)
             pixel_path = self._run_file(run_dir, pixel_file)
             self._validate_plain_twin(plain_path)
-            self._validate_canonical_frame(pixel_path)
+            shared_palette.update(self._validate_canonical_frame(pixel_path))
+            validated_frames.append((plain_path, pixel_path))
+        if len(shared_palette) > 12:
+            raise SpriteEngineError("canonical sprite frames exceed the shared palette")
+
+        plain_ids: list[UUID] = []
+        pixel_ids: list[UUID] = []
+        for plain_path, pixel_path in validated_frames:
             plain_ids.append(
                 self._put_artifact(
                     project.id,
@@ -242,7 +321,7 @@ class SpriteEngine:
                     kind="sprite_frame",
                     media_type="image/png",
                     variant="plain",
-                    dependencies=(source_id,),
+                    dependencies=(source_id, request_id),
                     width=256,
                     height=256,
                 ).id
@@ -254,7 +333,7 @@ class SpriteEngine:
                     kind="sprite_frame",
                     media_type="image/png",
                     variant="pixel",
-                    dependencies=(source_id,),
+                    dependencies=(source_id, request_id),
                     width=256,
                     height=256,
                 ).id
@@ -286,10 +365,15 @@ class SpriteEngine:
             variant="raw",
             dependencies=(*plain_ids, *pixel_ids),
         )
+        try:
+            (run_dir / "curation.json").unlink(missing_ok=True)
+        except OSError as exc:
+            raise SpriteEngineError("sprite curation state could not be reset") from exc
         self._write_state(
             run_dir,
             {
-                **state,
+                "input_artifact_id": str(source_id),
+                "request_artifact_id": str(request_id),
                 "plain_artifact_ids": [str(item) for item in plain_ids],
                 "pixel_artifact_ids": [str(item) for item in pixel_ids],
                 "preview_artifact_ids": [str(item) for item in preview_ids],
@@ -307,78 +391,104 @@ class SpriteEngine:
             diagnostics=diagnostics,
         )
 
+    @_serialized_engine_mutation
     def load_curation(self, project_id: UUID | str) -> CurationSnapshot:
         """Load the current upstream curation sidecar and its generation revision."""
 
-        project = self.store.load(project_id)
-        run_dir, state = self._extracted_state(project.id)
-        with read_guard(run_dir):
-            payload = load_curation(run_dir)
-            revision = run_revision(run_dir)
-            return self._curation_snapshot(run_dir, state, payload, revision)
+        with _curation_boundary("curation load"):
+            project = self.store.load(project_id)
+            run_dir, state = self._extracted_state(project.id)
+            with read_guard(run_dir):
+                payload = load_curation(run_dir)
+                revision = run_revision(run_dir)
+                curation_ids = self._current_curation_dependencies(project.id, run_dir, state)
+                return self._curation_snapshot(
+                    run_dir, state, payload, revision, curation_ids[0] if curation_ids else None
+                )
 
+    @_serialized_engine_mutation
     def stamp_curation(
         self, project_id: UUID | str, payload: Mapping[str, Any]
     ) -> CurationSnapshot:
         """Atomically save a caller revision-checked upstream curation sidecar."""
 
-        try:
-            submitted = json.loads(json.dumps(payload))
-        except (TypeError, ValueError) as exc:
-            raise SpriteEngineError("invalid curation payload") from exc
-        if not isinstance(submitted, dict):
-            raise SpriteEngineError("invalid curation payload")
-        if submitted.get("kind") != "sprite-gen-curation" or submitted.get("version") != 1:
-            raise SpriteEngineError("invalid curation payload")
-        if not isinstance(submitted.get("states"), dict) or set(submitted["states"]) - {_UPLOAD_STATE}:
-            raise SpriteEngineError("invalid curation payload")
-        expected = submitted.get("runRevision")
-        if not isinstance(expected, str) or not expected:
-            raise SpriteEngineError("curation runRevision is required")
+        with _curation_boundary("curation update"):
+            try:
+                submitted = json.loads(json.dumps(payload))
+            except (TypeError, ValueError) as exc:
+                raise SpriteEngineError("invalid curation payload") from exc
+            if not isinstance(submitted, dict):
+                raise SpriteEngineError("invalid curation payload")
+            if submitted.get("kind") != "sprite-gen-curation" or submitted.get("version") != 1:
+                raise SpriteEngineError("invalid curation payload")
+            if not isinstance(submitted.get("states"), dict) or set(submitted["states"]) - {_UPLOAD_STATE}:
+                raise SpriteEngineError("invalid curation payload")
+            expected = submitted.get("runRevision")
+            if not isinstance(expected, str) or not expected:
+                raise SpriteEngineError("curation runRevision is required")
 
-        project = self.store.load(project_id)
-        run_dir, state = self._extracted_state(project.id)
-        with read_guard(run_dir):
-            current = run_revision(run_dir)
-            if expected != current:
-                raise SpriteEngineError("stale curation revision")
-            stamped = stamp_curation(run_dir, submitted)
-            atomic_write_text(
-                run_dir / "curation.json",
-                json.dumps(stamped, ensure_ascii=False, indent=2) + "\n",
+            project = self.store.load(project_id)
+            run_dir, state = self._extracted_state(project.id)
+            request = self._request(run_dir)
+            self._validate_curation_payload(
+                submitted, int(request["states"][_UPLOAD_STATE]["frames"])
             )
+            with read_guard(run_dir):
+                current = run_revision(run_dir)
+                if expected != current:
+                    raise SpriteEngineError("stale curation revision")
+                stamped = stamp_curation(run_dir, submitted)
+                sidecar_text = json.dumps(stamped, ensure_ascii=False, indent=2) + "\n"
+                sidecar_bytes = sidecar_text.encode()
+                atomic_write_text(run_dir / "curation.json", sidecar_text)
+                pixel_ids = self._state_uuids(state, "pixel_artifact_ids")
+                artifact = self._put_artifact(
+                    project.id,
+                    sidecar_bytes,
+                    kind="sprite_curation",
+                    media_type="application/json",
+                    variant="raw",
+                    dependencies=pixel_ids,
+                )
+                next_state = {
+                    key: value
+                    for key, value in state.items()
+                    if key
+                    not in {
+                        "atlas_artifact_id",
+                        "manifest_artifact_id",
+                        "compose_report_artifact_id",
+                        "inspect_report_artifact_id",
+                    }
+                }
+                next_state["curation_artifact_id"] = str(artifact.id)
+                self._write_state(run_dir, next_state)
+            return self._curation_snapshot(run_dir, state, stamped, current, artifact.id)
 
-        pixel_ids = self._state_uuids(state, "pixel_artifact_ids")
-        artifact = self._put_artifact(
-            project.id,
-            (run_dir / "curation.json").read_bytes(),
-            kind="sprite_curation",
-            media_type="application/json",
-            variant="raw",
-            dependencies=pixel_ids,
-        )
-        self._write_state(run_dir, {**state, "curation_artifact_id": str(artifact.id)})
-        return self._curation_snapshot(run_dir, state, stamped, current, artifact.id)
-
+    @_serialized_engine_mutation
     def compose(self, project_id: UUID | str) -> ComposeResult:
         """Bake the selected upstream frames into a local atlas and manifest."""
 
         project = self.store.load(project_id)
         run_dir, state = self._extracted_state(project.id)
+        curation_ids = self._current_curation_dependencies(project.id, run_dir, state)
         result = self._invoke("compose", compose_atlas.run, run_dir=run_dir)
         self._require_success("compose", result)
 
         pixel_ids = self._state_uuids(state, "pixel_artifact_ids")
+        if self._current_curation_dependencies(project.id, run_dir, state) != curation_ids:
+            raise SpriteEngineError("sprite curation provenance changed during compose")
         atlas_path = self._run_file(run_dir, "sprite-sheet-alpha.png")
         manifest_path = self._run_file(run_dir, "manifest.json")
         report_path = self._run_file(run_dir, "sprite-sheet-alpha.report.json")
+        self._validate_canonical_atlas(atlas_path, rows=len(self._request(run_dir)["states"]))
         atlas = self._put_artifact(
             project.id,
             atlas_path.read_bytes(),
             kind="sprite_atlas",
             media_type="image/png",
             variant="pixel",
-            dependencies=pixel_ids,
+            dependencies=(*pixel_ids, *curation_ids),
         )
         manifest = self._put_artifact(
             project.id,
@@ -386,7 +496,7 @@ class SpriteEngine:
             kind="sprite_manifest",
             media_type="application/json",
             variant="raw",
-            dependencies=(*pixel_ids, atlas.id),
+            dependencies=(*pixel_ids, *curation_ids, atlas.id),
         )
         report = self._put_artifact(
             project.id,
@@ -394,7 +504,7 @@ class SpriteEngine:
             kind="sprite_report",
             media_type="application/json",
             variant="raw",
-            dependencies=(*pixel_ids, atlas.id),
+            dependencies=(*pixel_ids, *curation_ids, atlas.id),
         )
         self._write_state(
             run_dir,
@@ -412,6 +522,7 @@ class SpriteEngine:
             outputs=("sprite-sheet-alpha.png", "manifest.json", "sprite-sheet-alpha.report.json"),
         )
 
+    @_serialized_engine_mutation
     def inspect(self, project_id: UUID | str) -> InspectionResult:
         """Return a redacted upstream inspection report and preserve it immutably."""
 
@@ -424,8 +535,6 @@ class SpriteEngine:
         report_path = run_dir / "sprite-inspect.report.json"
         atomic_write_text(report_path, json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
         dependencies = self._state_uuids(state, "pixel_artifact_ids")
-        if "atlas_artifact_id" in state:
-            dependencies = (*dependencies, self._state_uuid(state, "atlas_artifact_id"))
         artifact = self._put_artifact(
             project.id,
             report_path.read_bytes(),
@@ -434,6 +543,7 @@ class SpriteEngine:
             variant="raw",
             dependencies=dependencies,
         )
+        self._write_state(run_dir, {**state, "inspect_report_artifact_id": str(artifact.id)})
         return InspectionResult(
             report_artifact_id=artifact.id,
             outputs=("sprite-inspect.report.json",),
@@ -525,6 +635,153 @@ class SpriteEngine:
             raise SpriteEngineError("invalid upload artifact")
         return artifact
 
+    def _current_curation_dependencies(
+        self, project_id: UUID, run_dir: Path, state: dict[str, Any]
+    ) -> tuple[UUID, ...]:
+        path = run_dir / "curation.json"
+        if not path.is_file():
+            if "curation_artifact_id" in state:
+                raise SpriteEngineError("sprite curation provenance is unavailable")
+            return ()
+        if "curation_artifact_id" not in state:
+            raise SpriteEngineError("sprite curation provenance is unavailable")
+        artifact_id = self._state_uuid(state, "curation_artifact_id")
+        try:
+            if path.read_bytes() != self.store.read_artifact_bytes(project_id, artifact_id):
+                raise SpriteEngineError("sprite curation provenance is unavailable")
+        except SpriteEngineError:
+            raise
+        except (OSError, ProjectStoreError) as exc:
+            raise SpriteEngineError("sprite curation provenance is unavailable") from exc
+        return (artifact_id,)
+
+    @staticmethod
+    def _curation_index(value: object, frames: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < frames:
+            raise SpriteEngineError("invalid curation payload")
+        return value
+
+    @staticmethod
+    def _finite_curation_number(value: object) -> bool:
+        return not isinstance(value, bool) and isinstance(value, (int, float)) and isfinite(value)
+
+    @classmethod
+    def _curation_index_key(cls, value: object, frames: int) -> int:
+        if not isinstance(value, str) or not value.isdecimal():
+            raise SpriteEngineError("invalid curation payload")
+        index = cls._curation_index(int(value), frames)
+        if value != str(index):
+            raise SpriteEngineError("invalid curation payload")
+        return index
+
+    @classmethod
+    def _validate_curation_indices(cls, entry: dict[str, Any], key: str, frames: int) -> set[int]:
+        if key not in entry:
+            return set()
+        values = entry[key]
+        if not isinstance(values, list) or len(values) > frames:
+            raise SpriteEngineError("invalid curation payload")
+        indices = [cls._curation_index(value, frames) for value in values]
+        if len(indices) != len(set(indices)):
+            raise SpriteEngineError("invalid curation payload")
+        return set(indices)
+
+    @classmethod
+    def _validate_curation_payload(cls, payload: dict[str, Any], frames: int) -> None:
+        if frames < 1 or payload.get("pixel_perfect") is False:
+            raise SpriteEngineError("invalid curation payload")
+        if "pixel_perfect" in payload and not isinstance(payload["pixel_perfect"], bool):
+            raise SpriteEngineError("invalid curation payload")
+        entry = payload["states"].get(_UPLOAD_STATE)
+        if entry is None:
+            return
+        if not isinstance(entry, dict) or entry.get("pixel_perfect") is False:
+            raise SpriteEngineError("invalid curation payload")
+        if "pixel_perfect" in entry and not isinstance(entry["pixel_perfect"], bool):
+            raise SpriteEngineError("invalid curation payload")
+        clones = entry.get("clones")
+        if clones is not None and (not isinstance(clones, dict) or clones):
+            raise SpriteEngineError("invalid curation payload")
+
+        selected = cls._validate_curation_indices(entry, "selected", frames)
+        deleted = cls._validate_curation_indices(entry, "deleted", frames)
+        cls._validate_curation_indices(entry, "order", frames)
+        if selected & deleted:
+            raise SpriteEngineError("invalid curation payload")
+
+        transforms = entry.get("transforms")
+        if transforms is not None:
+            if not isinstance(transforms, dict) or len(transforms) > frames:
+                raise SpriteEngineError("invalid curation payload")
+            for key, transform in transforms.items():
+                cls._curation_index_key(key, frames)
+                if not isinstance(transform, dict) or set(transform) - _CURATION_TRANSFORM_FIELDS:
+                    raise SpriteEngineError("invalid curation payload")
+                for name, value in transform.items():
+                    if name in {"dx", "dy"}:
+                        if (
+                            isinstance(value, bool)
+                            or not isinstance(value, int)
+                            or abs(value) > 256
+                            or value % 2
+                        ):
+                            raise SpriteEngineError("invalid curation payload")
+                    elif name == "rotate":
+                        if (
+                            isinstance(value, bool)
+                            or not isinstance(value, int)
+                            or abs(value) > 360
+                            or value % 90
+                        ):
+                            raise SpriteEngineError("invalid curation payload")
+                    elif name == "scale" and (
+                        not cls._finite_curation_number(value) or value != 1
+                    ):
+                        raise SpriteEngineError("invalid curation payload")
+                    elif name in {"shx", "shy"} and (
+                        not cls._finite_curation_number(value) or value != 0
+                    ):
+                        raise SpriteEngineError("invalid curation payload")
+                    elif name == "flipX" and not (
+                        isinstance(value, bool) or (type(value) is int and value in (0, 1))
+                    ):
+                        raise SpriteEngineError("invalid curation payload")
+
+        pixels = entry.get("pixels")
+        if pixels is not None:
+            if not isinstance(pixels, dict) or len(pixels) > frames:
+                raise SpriteEngineError("invalid curation payload")
+            for frame_key, edits in pixels.items():
+                cls._curation_index_key(frame_key, frames)
+                if not isinstance(edits, dict) or len(edits) > 256 * 256:
+                    raise SpriteEngineError("invalid curation payload")
+                blocks: dict[tuple[int, int], dict[tuple[int, int], object]] = {}
+                for coordinate, color in edits.items():
+                    if not isinstance(coordinate, str):
+                        raise SpriteEngineError("invalid curation payload")
+                    match = _PIXEL_EDIT_COORDINATE.fullmatch(coordinate)
+                    if match is None:
+                        raise SpriteEngineError("invalid curation payload")
+                    x, y = (int(value) for value in match.groups())
+                    if x >= 256 or y >= 256 or (
+                        color is not None
+                        and (not isinstance(color, str) or re.fullmatch(r"#[0-9A-Fa-f]{6}", color) is None)
+                    ):
+                        raise SpriteEngineError("invalid curation payload")
+                    blocks.setdefault((x // 2, y // 2), {})[(x, y)] = color
+                for (block_x, block_y), block in blocks.items():
+                    if set(block) != {
+                        (block_x * 2, block_y * 2),
+                        (block_x * 2 + 1, block_y * 2),
+                        (block_x * 2, block_y * 2 + 1),
+                        (block_x * 2 + 1, block_y * 2 + 1),
+                    } or len(set(block.values())) != 1:
+                        raise SpriteEngineError("invalid curation payload")
+
+        selected_plan, _transforms = state_plan(payload, _UPLOAD_STATE, frames)
+        if not selected_plan:
+            raise SpriteEngineError("invalid curation payload")
+
     def _prepared_state(self, project_id: UUID) -> tuple[Path, dict[str, Any]]:
         run_dir = self.store.run_dir(project_id)
         state = self._state(run_dir)
@@ -609,28 +866,61 @@ class SpriteEngine:
             raise SpriteEngineError("plain sprite twin is invalid") from exc
 
     @staticmethod
-    def _validate_canonical_frame(path: Path) -> None:
-        try:
-            with Image.open(path) as opened:
-                if opened.mode != "RGBA" or opened.size != (256, 256):
-                    raise SpriteEngineError("canonical sprite frame has invalid geometry")
-                frame = opened.copy()
-        except (OSError, UnidentifiedImageError) as exc:
-            raise SpriteEngineError("canonical sprite frame is invalid") from exc
+    def _validate_canonical_image(
+        frame: Image.Image, label: str
+    ) -> set[tuple[int, int, int]]:
+        if frame.mode != "RGBA" or frame.size != (256, 256):
+            raise SpriteEngineError(f"{label} has invalid geometry")
         alpha = frame.getchannel("A")
         if set(alpha.get_flattened_data()) - {0, 255}:
-            raise SpriteEngineError("canonical sprite frame has non-binary alpha")
+            raise SpriteEngineError(f"{label} has non-binary alpha")
         if alpha.getbbox() is None or alpha.getbbox()[3] != 256:
-            raise SpriteEngineError("canonical sprite frame does not use the foot anchor")
+            raise SpriteEngineError(f"{label} does not use the foot anchor")
         opaque = {pixel[:3] for pixel in frame.get_flattened_data() if pixel[3] == 255}
         if not opaque or len(opaque) > 12:
-            raise SpriteEngineError("canonical sprite frame exceeds the shared palette")
+            raise SpriteEngineError(f"{label} exceeds the shared palette")
         pixels = frame.load()
         for y in range(0, 256, 2):
             for x in range(0, 256, 2):
                 block = [pixels[x + dx, y + dy] for dy in range(2) for dx in range(2)]
                 if any(pixel[3] for pixel in block) and len(set(block)) != 1:
-                    raise SpriteEngineError("canonical sprite frame is not on the logical grid")
+                    raise SpriteEngineError(f"{label} is not on the logical grid")
+        return opaque
+
+    @classmethod
+    def _validate_canonical_frame(cls, path: Path) -> set[tuple[int, int, int]]:
+        try:
+            with Image.open(path) as opened:
+                frame = opened.copy()
+        except (OSError, UnidentifiedImageError) as exc:
+            raise SpriteEngineError("canonical sprite frame is invalid") from exc
+        return cls._validate_canonical_image(frame, "canonical sprite frame")
+
+    @classmethod
+    def _validate_canonical_atlas(cls, path: Path, *, rows: int) -> None:
+        try:
+            with Image.open(path) as opened:
+                atlas = opened.copy()
+        except (OSError, UnidentifiedImageError) as exc:
+            raise SpriteEngineError("canonical sprite atlas is invalid") from exc
+        if (
+            rows < 1
+            or atlas.mode != "RGBA"
+            or atlas.width < 256
+            or atlas.width % 256
+            or atlas.height != rows * 256
+        ):
+            raise SpriteEngineError("canonical sprite atlas has invalid geometry")
+        palette: set[tuple[int, int, int]] = set()
+        for top in range(0, atlas.height, 256):
+            for left in range(0, atlas.width, 256):
+                palette.update(
+                    cls._validate_canonical_image(
+                        atlas.crop((left, top, left + 256, top + 256)), "canonical sprite atlas"
+                    )
+                )
+        if len(palette) > 12:
+            raise SpriteEngineError("canonical sprite atlas exceeds the shared palette")
 
     def _put_artifact(
         self,
