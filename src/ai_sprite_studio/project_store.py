@@ -238,12 +238,20 @@ class ProjectStore:
         cls, parent_fd: int, name: str, *, create: bool, label: str
     ) -> int:
         try:
-            return os.open(name, cls._directory_flags(), dir_fd=parent_fd)
+            descriptor = os.open(name, cls._directory_flags(), dir_fd=parent_fd)
         except FileNotFoundError:
             if not create:
                 raise
         except OSError as exc:
             raise ProjectStoreError(f"unsafe {label} directory: {exc}") from exc
+        else:
+            if create:
+                try:
+                    cls._fsync_directory_fd(parent_fd)
+                except BaseException:
+                    os.close(descriptor)
+                    raise
+            return descriptor
 
         try:
             os.mkdir(name, 0o755, dir_fd=parent_fd)
@@ -251,9 +259,9 @@ class ProjectStore:
             pass
         except OSError as exc:
             raise ProjectStoreError(f"could not create {label} directory: {exc}") from exc
-        else:
-            # Persist this directory entry before opening a child beneath it.
-            cls._fsync_directory_fd(parent_fd)
+        # Persist a new entry, or repair durability after a failed prior
+        # attempt that left the child in place, before opening that child.
+        cls._fsync_directory_fd(parent_fd)
         try:
             return os.open(name, cls._directory_flags(), dir_fd=parent_fd)
         except OSError as exc:

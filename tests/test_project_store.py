@@ -173,16 +173,26 @@ def test_put_artifact_keeps_its_file_when_manifest_fsync_fails_after_publish(
     artifact_id = uuid4()
     project_root = tmp_path / "projects" / str(project.id)
     real_fsync = os.fsync
+    real_replace = os.replace
+    manifest_published = False
 
     def fail_manifest_directory_fsync(descriptor):
-        if Path(os.readlink(f"/proc/self/fd/{descriptor}")) == project_root:
+        if manifest_published and Path(os.readlink(f"/proc/self/fd/{descriptor}")) == project_root:
             raise OSError(errno.EIO, "manifest directory sync failed")
         return real_fsync(descriptor)
+
+    def record_manifest_replace(source, destination, *args, **kwargs):
+        nonlocal manifest_published
+        result = real_replace(source, destination, *args, **kwargs)
+        if destination == "project.json":
+            manifest_published = True
+        return result
 
     monkeypatch.setattr("ai_sprite_studio.project_store.uuid4", lambda: artifact_id)
     monkeypatch.setattr(
         "ai_sprite_studio.project_store.os.fsync", fail_manifest_directory_fsync
     )
+    monkeypatch.setattr("ai_sprite_studio.project_store.os.replace", record_manifest_replace)
 
     with pytest.raises(ProjectStoreError, match="fsync"):
         _artifact(store, project.id)
@@ -382,6 +392,44 @@ def test_put_artifact_does_not_commit_a_manifest_when_a_created_parent_sync_fail
         _artifact(store, project.id)
 
     assert store.load(project.id).artifacts == []
+
+
+def test_put_artifact_resyncs_a_parent_left_by_a_failed_attempt_before_retrying(
+    store, tmp_path, monkeypatch
+):
+    project = _project(store)
+    candidates = tmp_path / "projects" / str(project.id) / "candidates"
+    real_fsync_directory = ProjectStore._fsync_directory_fd
+    real_replace = os.replace
+    events = []
+    fail_once = True
+
+    def record_parent_sync(_cls, descriptor):
+        nonlocal fail_once
+        path = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        events.append(("fsync", path))
+        if fail_once and path == candidates:
+            fail_once = False
+            raise ProjectStoreError("first candidate parent sync failed")
+        return real_fsync_directory(descriptor)
+
+    def record_manifest_publish(source, destination, *args, **kwargs):
+        if destination == "project.json":
+            events.append(("manifest", None))
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(ProjectStore, "_fsync_directory_fd", classmethod(record_parent_sync))
+    monkeypatch.setattr("ai_sprite_studio.project_store.os.replace", record_manifest_publish)
+
+    with pytest.raises(ProjectStoreError, match="first candidate parent sync"):
+        _artifact(store, project.id)
+
+    retry_start = len(events)
+    artifact = _artifact(store, project.id)
+    manifest_index = events.index(("manifest", None), retry_start)
+
+    assert ("fsync", candidates) in events[retry_start:manifest_index]
+    assert [item.id for item in store.load(project.id).artifacts] == [artifact.id]
 
 
 def test_put_artifact_never_overwrites_a_target_created_during_immutable_publish(
