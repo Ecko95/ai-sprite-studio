@@ -14,6 +14,8 @@ PIXEL_REPO = "https://github.com/chongdashu/ai-pixel-snapped-game-sprites"
 PIXEL_REVISION = "5f4c8b99a1de38a84af7dcc36af80622e5057cd6"
 SPRITE_REPO = "https://github.com/aldegad/sprite-gen"
 SPRITE_REVISION = "606db6d89beedace80863374859752739369ba19"
+SETUPTOOLS_REQUIREMENT = "setuptools==80.9.0"
+WHEEL_REQUIREMENT = "wheel==0.45.1"
 
 PROMPTS = {
     f"prompts/{number:02}-{name}.md"
@@ -140,7 +142,7 @@ def test_offline_sync_check_accepts_locked_snapshot():
     assert result.stdout == "Verified 59 upstream assets.\n"
 
 
-def test_update_copies_from_the_locked_checkout_and_rewrites_hash(tmp_path):
+def _sync_fixture(tmp_path, destination):
     checkout = tmp_path / "checkouts" / "example"
     checkout.mkdir(parents=True)
     source = checkout / "asset.txt"
@@ -175,7 +177,6 @@ def test_update_copies_from_the_locked_checkout_and_rewrites_hash(tmp_path):
     project = tmp_path / "project"
     (project / "scripts").mkdir(parents=True)
     shutil.copyfile(ROOT / "scripts/sync_upstreams.py", project / "scripts/sync_upstreams.py")
-    destination = "src/example/assets/upstream/example/asset.txt"
     (project / "upstream-lock.json").write_text(
         json.dumps(
             {
@@ -193,6 +194,12 @@ def test_update_copies_from_the_locked_checkout_and_rewrites_hash(tmp_path):
             }
         )
     )
+    return project, source
+
+
+def test_update_copies_from_the_locked_checkout_and_rewrites_hash(tmp_path):
+    destination = "src/ai_sprite_studio/assets/upstream/example/asset.txt"
+    project, source = _sync_fixture(tmp_path, destination)
 
     updated = subprocess.run(
         [sys.executable, project / "scripts/sync_upstreams.py", "--update", tmp_path / "checkouts"],
@@ -216,15 +223,61 @@ def test_update_copies_from_the_locked_checkout_and_rewrites_hash(tmp_path):
     assert "hash mismatch" in checked.stderr
 
 
+def test_sync_rejects_destination_outside_upstream_assets_before_writing(tmp_path):
+    destination = "pyproject.toml"
+    project, _ = _sync_fixture(tmp_path, destination)
+    target = project / destination
+    original = b"project bytes must survive\n"
+    target.write_bytes(original)
+    lock_path = project / "upstream-lock.json"
+    lock = json.loads(lock_path.read_text())
+    lock["entries"][0]["sha256"] = hashlib.sha256(original).hexdigest()
+    lock_path.write_text(json.dumps(lock))
+
+    checked = subprocess.run(
+        [sys.executable, project / "scripts/sync_upstreams.py", "--check"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+    )
+    updated = subprocess.run(
+        [sys.executable, project / "scripts/sync_upstreams.py", "--update", tmp_path / "checkouts"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+    )
+
+    assert checked.returncode == 1
+    assert "destination outside upstream asset root" in checked.stderr
+    assert updated.returncode == 1
+    assert "destination outside upstream asset root" in updated.stderr
+    assert target.read_bytes() == original
+    assert json.loads(lock_path.read_text()) == lock
+
+
 def test_project_and_pinned_sprite_gen_are_importable():
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
     assert pyproject["project"]["requires-python"] == ">=3.12,<3.13"
+    assert pyproject["build-system"]["requires"] == [SETUPTOOLS_REQUIREMENT, WHEEL_REQUIREMENT]
+    assert pyproject["dependency-groups"]["build"] == [SETUPTOOLS_REQUIREMENT, WHEEL_REQUIREMENT]
+    assert pyproject["tool"]["uv"]["build-constraint-dependencies"] == [
+        SETUPTOOLS_REQUIREMENT,
+        WHEEL_REQUIREMENT,
+    ]
     assert pyproject["tool"]["uv"]["sources"]["sprite-gen"] == {
         "git": f"{SPRITE_REPO}.git",
         "rev": SPRITE_REVISION,
     }
 
     uv_lock = tomllib.loads((ROOT / "uv.lock").read_text())
+    project = next(package for package in uv_lock["package"] if package["name"] == "ai-sprite-studio")
+    assert project["dev-dependencies"]["build"] == [{"name": "setuptools"}, {"name": "wheel"}]
+    assert next(package for package in uv_lock["package"] if package["name"] == "setuptools")[
+        "version"
+    ] == "80.9.0"
+    assert next(package for package in uv_lock["package"] if package["name"] == "wheel")[
+        "version"
+    ] == "0.45.1"
     sprite_gen = next(package for package in uv_lock["package"] if package["name"] == "sprite-gen")
     assert sprite_gen["source"]["git"].endswith(
         f"sprite-gen.git?rev={SPRITE_REVISION}#{SPRITE_REVISION}"

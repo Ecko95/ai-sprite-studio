@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -20,6 +20,10 @@ dependencies = [
 ]
 
 [dependency-groups]
+build = [
+    "setuptools==80.9.0",
+    "wheel==0.45.1",
+]
 dev = [
     "playwright",
     "pytest",
@@ -27,6 +31,9 @@ dev = [
     "pytest-playwright",
     "ruff",
 ]
+
+[tool.uv]
+build-constraint-dependencies = ["setuptools==80.9.0", "wheel==0.45.1"]
 
 [tool.uv.sources]
 sprite-gen = { git = "https://github.com/aldegad/sprite-gen.git", rev = "606db6d89beedace80863374859752739369ba19" }

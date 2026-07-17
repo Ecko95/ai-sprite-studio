@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK_PATH = ROOT / "upstream-lock.json"
+ASSET_ROOT = ROOT / "src/ai_sprite_studio/assets/upstream"
 
 
 def _load_lock() -> dict:
@@ -37,6 +38,13 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _destination(relative: str) -> Path:
+    destination = _contained(ROOT, relative)
+    if not destination.is_relative_to(ASSET_ROOT.resolve()):
+        raise ValueError(f"destination outside upstream asset root: {relative}")
+    return destination
+
+
 def _check(lock: dict) -> list[str]:
     errors = []
     seen = set()
@@ -46,7 +54,7 @@ def _check(lock: dict) -> list[str]:
             errors.append(f"duplicate destination: {destination}")
             continue
         seen.add(destination)
-        path = _contained(ROOT, destination)
+        path = _destination(destination)
         if not path.is_file():
             errors.append(f"missing: {destination}")
         elif _sha256(path) != entry["sha256"]:
@@ -98,12 +106,12 @@ def _verify_checkouts(checkout_root: Path, entries: list[dict]) -> None:
 
 def _update(lock: dict, checkout_root: Path) -> None:
     checkout_root = checkout_root.resolve()
+    destinations = [_destination(entry["destination_path"]) for entry in lock["entries"]]
     _verify_checkouts(checkout_root, lock["entries"])
-    for entry in lock["entries"]:
+    for entry, destination in zip(lock["entries"], destinations, strict=True):
         source = _contained(_checkout(checkout_root, entry), entry["source_path"])
         if not source.is_file():
             raise FileNotFoundError(source)
-        destination = _contained(ROOT, entry["destination_path"])
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
         entry["sha256"] = _sha256(destination)
