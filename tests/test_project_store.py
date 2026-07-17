@@ -315,6 +315,19 @@ def test_put_artifact_validates_dependencies_before_writing_any_candidate(store,
     assert store.load(project.id).artifacts == []
 
 
+def test_put_artifact_rechecks_stale_dependencies_from_the_fresh_manifest(store):
+    project = _project(store)
+    root = _artifact(store, project.id, stage="root")
+    stale_dependency = _artifact(store, project.id, dependencies=[root.id], stage="child")
+    store.invalidate_dependants(project.id, [root.id])
+
+    with pytest.raises(ProjectStoreError, match="stale dependency"):
+        _artifact(store, project.id, dependencies=[stale_dependency.id], stage="grandchild")
+
+    artifacts = {artifact.id: artifact for artifact in store.load(project.id).artifacts}
+    assert artifacts[stale_dependency.id].stale
+
+
 def test_put_artifact_rejects_non_string_media_type_at_its_public_boundary(store, tmp_path):
     project = _project(store)
     candidate_root = tmp_path / "projects" / str(project.id) / "candidates"
@@ -579,6 +592,25 @@ def test_approve_records_live_hashes_and_rejects_stale_or_mismatched_records(sto
     store.get_artifact(project.id, artifact.id).write_bytes(b"changed outside the store")
     with pytest.raises(ProjectStoreError, match="hash"):
         store.approve(project.id, "base", [artifact.id])
+
+
+def test_replace_approval_invalidates_every_dropped_prior_root(store):
+    project = _project(store)
+    first = _artifact(store, project.id, stage="first")
+    dropped = _artifact(store, project.id, stage="dropped")
+    replacement = _artifact(store, project.id, stage="replacement")
+    dropped_child = _artifact(store, project.id, dependencies=[dropped.id], stage="child")
+    store.approve(project.id, "base", [first.id, dropped.id])
+
+    store.replace_approval_and_invalidate_dependants(
+        project.id,
+        "base",
+        [replacement.id],
+        previous_artifact_ids=[first.id, dropped.id],
+    )
+
+    artifacts = {artifact.id: artifact for artifact in store.load(project.id).artifacts}
+    assert artifacts[dropped_child.id].stale
 
 
 def test_invalidate_dependants_marks_only_transitive_children_stale_and_keeps_files(store):

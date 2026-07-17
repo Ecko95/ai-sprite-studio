@@ -6,7 +6,37 @@ import pytest
 
 from ai_sprite_studio.contracts import ProjectConfig, StateSpec
 from ai_sprite_studio.pipeline import PipelineError, approve_gate, preflight_requests, put_stage_artifact
-from ai_sprite_studio.project_store import ProjectStore
+from ai_sprite_studio.project_store import ProjectStore, ProjectStoreError
+
+
+def _base_snap(store, project_id, source_id, data):
+    generated = put_stage_artifact(
+        store,
+        project_id,
+        "base_generation",
+        data + b" generation",
+        media_type="image/png",
+        dependencies=[source_id],
+    )
+    return put_stage_artifact(
+        store,
+        project_id,
+        "base_snap",
+        data + b" snap",
+        media_type="image/png",
+        dependencies=[generated.id],
+    )
+
+
+def _directions(store, project_id, snapped, data):
+    return put_stage_artifact(
+        store,
+        project_id,
+        "directional_anchors",
+        data,
+        media_type="image/png",
+        dependencies=[snapped.id],
+    )
 
 
 def test_stage_artifacts_record_their_required_direct_dependencies(tmp_path) -> None:
@@ -419,3 +449,153 @@ def test_gate_rejects_a_predecessor_with_mismatched_stored_hash(monkeypatch, tmp
 
     with pytest.raises(PipelineError, match="hash does not match"):
         approve_gate(store, project.id, "directions", [directions.id])
+
+
+def test_gate_revalidates_generic_predecessor_approvals_against_pipeline_policy(tmp_path) -> None:
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig())
+    source = store.put_artifact(
+        project.id,
+        b"identity",
+        kind="input",
+        media_type="image/png",
+        variant="raw",
+    )
+    snapped = _base_snap(store, project.id, source.id, b"valid")
+    directions = _directions(store, project.id, snapped, b"directions")
+    store.approve(project.id, "base", [source.id])
+
+    with pytest.raises(PipelineError, match="base approval.*wrong stage"):
+        approve_gate(store, project.id, "directions", [directions.id])
+
+    wrong_project = store.create(ProjectConfig())
+    wrong_source = store.put_artifact(
+        wrong_project.id,
+        b"identity",
+        kind="input",
+        media_type="image/png",
+        variant="raw",
+    )
+    wrong_snap = store.put_artifact(
+        wrong_project.id,
+        b"wrong snap",
+        kind="base_snap",
+        stage="base_snap",
+        media_type="image/png",
+        variant="raw",
+        dependencies=[wrong_source.id],
+    )
+    wrong_directions = _directions(store, wrong_project.id, wrong_snap, b"directions")
+    store.approve(wrong_project.id, "base", [wrong_snap.id])
+
+    with pytest.raises(PipelineError, match="base approval.*direct input"):
+        approve_gate(store, wrong_project.id, "directions", [wrong_directions.id])
+
+
+def test_stage_persistence_rechecks_dependencies_after_pipeline_preflight(monkeypatch, tmp_path) -> None:
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig())
+    source = store.put_artifact(
+        project.id,
+        b"identity",
+        kind="input",
+        media_type="image/png",
+        variant="raw",
+    )
+    generated = put_stage_artifact(
+        store,
+        project.id,
+        "base_generation",
+        b"base",
+        media_type="image/png",
+        dependencies=[source.id],
+    )
+    put_artifact = store.put_artifact
+
+    def invalidate_after_preflight(*args, **kwargs):
+        store.invalidate_dependants(project.id, [source.id])
+        return put_artifact(*args, **kwargs)
+
+    monkeypatch.setattr(store, "put_artifact", invalidate_after_preflight)
+
+    with pytest.raises(ProjectStoreError, match="stale dependency"):
+        put_stage_artifact(
+            store,
+            project.id,
+            "base_snap",
+            b"snap",
+            media_type="image/png",
+            dependencies=[generated.id],
+        )
+
+
+def test_replacement_failure_keeps_existing_approval_and_dependants_live(tmp_path) -> None:
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig())
+    source = store.put_artifact(
+        project.id,
+        b"identity",
+        kind="input",
+        media_type="image/png",
+        variant="raw",
+    )
+    old_snap = _base_snap(store, project.id, source.id, b"old")
+    old_directions = _directions(store, project.id, old_snap, b"old directions")
+    old_approval = approve_gate(store, project.id, "base", [old_snap.id])
+    replacement = _base_snap(store, project.id, source.id, b"replacement")
+    store.get_artifact(project.id, replacement.id).write_bytes(b"corrupt replacement")
+
+    with pytest.raises(ProjectStoreError, match="hash"):
+        approve_gate(store, project.id, "base", [replacement.id])
+
+    loaded = store.load(project.id)
+    artifacts = {artifact.id: artifact for artifact in loaded.artifacts}
+    assert loaded.approvals == [old_approval]
+    assert not artifacts[old_directions.id].stale
+
+
+def test_reordered_approval_selection_does_not_invalidate_descendants(tmp_path) -> None:
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig())
+    source = store.put_artifact(
+        project.id,
+        b"identity",
+        kind="input",
+        media_type="image/png",
+        variant="raw",
+    )
+    first_snap = _base_snap(store, project.id, source.id, b"first")
+    second_snap = _base_snap(store, project.id, source.id, b"second")
+    first_directions = _directions(store, project.id, first_snap, b"first directions")
+    second_directions = _directions(store, project.id, second_snap, b"second directions")
+    approve_gate(store, project.id, "base", [first_snap.id, second_snap.id])
+
+    approve_gate(store, project.id, "base", [second_snap.id, first_snap.id])
+
+    artifacts = {artifact.id: artifact for artifact in store.load(project.id).artifacts}
+    assert not artifacts[first_directions.id].stale
+    assert not artifacts[second_directions.id].stale
+
+
+def test_partial_approval_replacement_invalidates_only_removed_roots(tmp_path) -> None:
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig())
+    source = store.put_artifact(
+        project.id,
+        b"identity",
+        kind="input",
+        media_type="image/png",
+        variant="raw",
+    )
+    removed_snap = _base_snap(store, project.id, source.id, b"removed")
+    retained_snap = _base_snap(store, project.id, source.id, b"retained")
+    replacement_snap = _base_snap(store, project.id, source.id, b"replacement")
+    removed_directions = _directions(store, project.id, removed_snap, b"removed directions")
+    retained_directions = _directions(store, project.id, retained_snap, b"retained directions")
+    approve_gate(store, project.id, "base", [removed_snap.id, retained_snap.id])
+
+    approve_gate(store, project.id, "base", [retained_snap.id, replacement_snap.id])
+
+    artifacts = {artifact.id: artifact for artifact in store.load(project.id).artifacts}
+    assert artifacts[removed_directions.id].stale
+    assert not artifacts[retained_directions.id].stale

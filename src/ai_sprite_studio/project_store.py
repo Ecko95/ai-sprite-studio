@@ -168,6 +168,59 @@ class ProjectStore:
             self._write_project_at(project_fd, updated)
             return approval
 
+    def replace_approval_and_invalidate_dependants(
+        self,
+        project_id: UUID | str,
+        gate: ApprovalGate,
+        artifact_ids: Iterable[UUID | str],
+        *,
+        previous_artifact_ids: Iterable[UUID | str],
+        note: str = "",
+    ) -> Approval:
+        """Replace one approval and stale dependants of removed roots in one manifest write."""
+
+        project_id = self._uuid(project_id, "project ID")
+        expected_ids = [self._uuid(item, "previous artifact ID") for item in previous_artifact_ids]
+        if not expected_ids or len(expected_ids) != len(set(expected_ids)):
+            raise ProjectStoreError("previous approval artifacts must be unique and non-empty")
+        if not isinstance(note, str):
+            raise ProjectStoreError("approval note must be text")
+        with self._project_fd(project_id) as project_fd:
+            project = self._load_at(project_fd, project_id)
+            previous = next((item for item in project.approvals if item.gate == gate), None)
+            if previous is None:
+                raise ProjectStoreError("approval to replace does not exist")
+            if set(previous.artifact_ids) != set(expected_ids):
+                raise ProjectStoreError("approval changed before replacement")
+
+            approval = self._approval_for(gate, artifact_ids, note)
+            removed_ids = [
+                artifact_id
+                for artifact_id in previous.artifact_ids
+                if artifact_id not in approval.artifact_ids
+            ]
+            if not removed_ids:
+                raise ProjectStoreError("approval replacement must remove an artifact")
+            artifacts = {artifact.id: artifact for artifact in project.artifacts}
+            hashes = self._approval_hashes_at(project_fd, approval, artifacts)
+            approval = approval.model_copy(update={"artifact_hashes": hashes})
+
+            invalidated, stale_project = self._invalidate(project, removed_ids)
+            if set(invalidated).intersection(approval.artifact_ids):
+                raise ProjectStoreError("replacement approval depends on a removed artifact")
+            updated_project = stale_project or project
+            updated = updated_project.model_copy(
+                update={
+                    "approvals": [
+                        item for item in updated_project.approvals if item.gate != approval.gate
+                    ]
+                    + [approval],
+                    "updated_at": self._now(),
+                }
+            )
+            self._write_project_at(project_fd, updated)
+            return approval
+
     def invalidate_dependants(
         self, project_id: UUID | str, artifact_ids: Iterable[UUID | str]
     ) -> list[UUID]:
@@ -740,9 +793,12 @@ class ProjectStore:
     ) -> ArtifactRef:
         with self._project_fd(project_id) as project_fd:
             project = self._load_at(project_fd, project_id)
-            known_ids = {artifact.id for artifact in project.artifacts}
-            if any(item not in known_ids for item in dependency_ids):
+            artifacts = {artifact.id: artifact for artifact in project.artifacts}
+            if any(item not in artifacts for item in dependency_ids):
                 raise ProjectStoreError("unknown dependency artifact")
+            if any(artifacts[item].stale for item in dependency_ids):
+                raise ProjectStoreError("stale dependency artifact")
+            known_ids = set(artifacts)
             extension = self._extension_for(media_type)
             stage_name = None if kind == "input" else self._safe_component(stage or kind, "stage")
 

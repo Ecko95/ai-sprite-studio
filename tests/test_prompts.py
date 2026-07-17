@@ -11,6 +11,7 @@ from ai_sprite_studio.contracts import ProjectConfig
 from ai_sprite_studio.project_store import ProjectStore, ProjectStoreError
 from ai_sprite_studio.prompts import (
     PromptError,
+    RenderedPrompt,
     STAGES,
     guide_for_stage,
     list_stages,
@@ -94,12 +95,19 @@ def test_cross_reference_corrections_are_rendered_without_editing_sources() -> N
         },
         direction="right",
     )
+    snapped = render_prompt("base_snap", project, {})
     recovery = render_prompt("frame_recovery", project, {}, state="attack")
 
     assert directions.provenance["correction_ids"] == ["direction-policy-right-up-left"]
     assert "Generate right and up anchors from the snapped south." in directions.text
     assert "Generate west and north anchors from the snapped south." not in directions.text
     assert "Directional anchors NSEW" not in directions.text
+    assert "screen-left" not in directions.text
+    assert "For mirrored projects, left is a horizontal flip of right" in directions.text
+    assert "For independent-side projects, generate left separately." in directions.text
+    assert snapped.provenance["correction_ids"] == ["direction-policy-right-up-left"]
+    assert "N/S/E/W" not in snapped.text
+    assert "For mirrored projects, left is derived by mirroring right." in snapped.text
     assert recovery.provenance["correction_ids"] == ["frame-recovery-next-stage"]
     assert "Feed these to file 07 (per-frame chroma-layout snap)." in recovery.text
     assert "Feed these to file 06 (per-frame chroma-layout snap)." in load_source("frame_recovery")
@@ -171,6 +179,109 @@ def test_rendered_prompt_persists_as_one_immutable_contained_record(tmp_path) ->
     assert store.load_prompt(project.id, record["job_id"]) == record
     with pytest.raises(ProjectStoreError, match="overwrite"):
         store.save_prompt(project.id, record["job_id"], record)
+
+
+def test_persist_prompt_rejects_a_self_consistent_forged_project_context(tmp_path) -> None:
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig())
+    rendered = render_prompt("base_snap", project, {})
+    body = rendered.text.partition("\n")[2]
+    forged_provenance = {
+        **rendered.provenance,
+        "locked_context": {**rendered.provenance["locked_context"], "chroma": "#123456"},
+    }
+    forged = RenderedPrompt(
+        text=(
+            prompt_module._HEADER_PREFIX
+            + prompt_module._json(forged_provenance)
+            + prompt_module._HEADER_SUFFIX
+            + "\n"
+            + body
+        ),
+        provenance=forged_provenance,
+        sha256=rendered.sha256,
+    )
+
+    with pytest.raises(PromptError, match="canonical"):
+        persist_prompt(store, project.id, uuid4(), forged)
+
+    assert not list((tmp_path / "projects" / str(project.id) / "prompts").glob("*.json"))
+
+
+def test_persist_prompt_rejects_reserved_provenance_keys(tmp_path) -> None:
+    store = ProjectStore(tmp_path)
+    project = store.create(ProjectConfig())
+    rendered = render_prompt("base_snap", project, {})
+    body = rendered.text.partition("\n")[2]
+    forged_provenance = {**rendered.provenance, "text": "forged record text"}
+    forged = RenderedPrompt(
+        text=(
+            prompt_module._HEADER_PREFIX
+            + prompt_module._json(forged_provenance)
+            + prompt_module._HEADER_SUFFIX
+            + "\n"
+            + body
+        ),
+        provenance=forged_provenance,
+        sha256=rendered.sha256,
+    )
+
+    with pytest.raises(PromptError, match="reserved"):
+        persist_prompt(store, project.id, uuid4(), forged)
+
+
+def test_direction_substitutions_match_context_and_mirror_policy() -> None:
+    mirrored = ProjectConfig(side_policy="mirror")
+    independent = ProjectConfig(side_policy="independent")
+
+    with pytest.raises(PromptError, match="must match"):
+        render_prompt(
+            "walk_i2v",
+            mirrored,
+            {"DURATION": 4, "DIRECTION": "right"},
+            direction="up",
+            state="walk",
+        )
+    with pytest.raises(PromptError, match="derive left"):
+        render_prompt(
+            "directional_anchors",
+            mirrored,
+            {
+                "DIRECTION": "left",
+                "DIRECTION_DESCRIPTION": "profile view, facing screen-left",
+            },
+            direction="left",
+        )
+    with pytest.raises(PromptError, match="derive left"):
+        render_prompt(
+            "action_poseboards",
+            mirrored,
+            {
+                "ACTION": "attack",
+                "DIRECTION_DESCRIPTION": "profile view, facing left",
+                "COLS": 4,
+                "ROWS": 3,
+                "N": 4,
+                "CANVAS_W": 2048,
+                "CANVAS_H": 1536,
+                "FRAME_BY_FRAME_DESCRIPTION": "Frame 1: ready stance. Frame 2: strike.",
+                "ACTION_SPECIFIC_CONSTRAINTS": "Keep the weapon readable.",
+            },
+            direction="left",
+            state="attack",
+        )
+    independent_left = render_prompt(
+        "directional_anchors",
+        independent,
+        {
+            "DIRECTION": "left",
+            "DIRECTION_DESCRIPTION": "profile view, facing left",
+        },
+        direction="left",
+    )
+
+    assert independent_left.provenance["locked_context"]["direction"] == "left"
+    assert "For independent-side projects, generate left separately." in independent_left.text
 
 
 @pytest.mark.parametrize(
@@ -276,8 +387,8 @@ def test_all_stage_renderings_have_stable_semantic_snapshots() -> None:
 
     assert actual == {
         "base_generation": "10995a4a5c59aac8be97304b9931929d99e17cf674fe0191cdaebd1606d484e7",
-        "base_snap": "0834107bcc86a543d09a03df54641c5c956f879d2adc626e6d866253ae1a51dc",
-        "directional_anchors": "130bf82b593ef2da274f2bf9dd8bd3435448ab11e38d1962e35e233893b33ea7",
+        "base_snap": "e47e852431f7279090a1b081a942973515edf8b62190d8f9b957ac273e0e9a29",
+        "directional_anchors": "169cea44e09b922c7c1404f4ecf1cc8198108ebd12c642fdb794ec1f0e77f882",
         "action_poseboards": "2c244bd33bb8a48171c510081bc70fb14e8624026f6aa5463fbf3cd55e97fd48",
         "frame_recovery": "c7622d314cbdbc40eafa37cc1c11cd222317bd78dc4329a5c9ef191252638f71",
         "walk_i2v": "4b11cdb5fa5c29e7303e9bd5a0f5e463ba526cc1a252319b79a205b1ed8e9425",

@@ -141,28 +141,30 @@ def approve_gate(
     selected_ids = _input_ids(artifact_ids)
     if not selected_ids:
         raise PipelineError("approval requires at least one artifact")
-    artifacts = {artifact.id: artifact for artifact in project.artifacts}
-    for artifact_id in selected_ids:
-        artifact = artifacts.get(artifact_id)
-        if artifact is None:
-            raise PipelineError("unknown approval artifact")
-        if artifact.stale:
-            raise PipelineError("cannot approve a stale artifact")
-        if artifact.kind not in _GATE_KINDS[gate]:
-            raise PipelineError("approval artifact has the wrong stage")
+    _validate_gate_artifacts(project, gate, selected_ids)
     for predecessor in _GATE_PREDECESSORS[gate]:
         approval = _stored_approval(project, predecessor)
         if approval is None:
             raise PipelineError(f"{predecessor} approval is required")
-        _validate_stored_approval(project, approval)
+        _validate_stored_approval(project, predecessor, approval)
     previous = _stored_approval(project, gate)
     if previous is not None:
         _validate_approval_hashes(project, previous, require_live=False)
-        if previous.artifact_ids != selected_ids:
-            stale_ids = _descendant_ids(project, previous.artifact_ids)
-            if stale_ids.intersection(selected_ids):
-                raise PipelineError("replacement approval depends on its prior selection")
-            store.invalidate_dependants(project.id, previous.artifact_ids)
+        if set(previous.artifact_ids) == set(selected_ids):
+            return store.approve(project.id, gate, previous.artifact_ids, note=note)
+        removed_ids = [artifact_id for artifact_id in previous.artifact_ids if artifact_id not in selected_ids]
+        if not removed_ids:
+            return store.approve(project.id, gate, selected_ids, note=note)
+        stale_ids = _descendant_ids(project, removed_ids)
+        if stale_ids.intersection(selected_ids):
+            raise PipelineError("replacement approval depends on its prior selection")
+        return store.replace_approval_and_invalidate_dependants(
+            project.id,
+            gate,
+            selected_ids,
+            previous_artifact_ids=previous.artifact_ids,
+            note=note,
+        )
     return store.approve(project.id, gate, selected_ids, note=note)
 
 
@@ -231,7 +233,35 @@ def _stored_approval(project: ProjectConfig, gate: str) -> Approval | None:
     return next((approval for approval in project.approvals if approval.gate == gate), None)
 
 
-def _validate_stored_approval(project: ProjectConfig, approval: Approval) -> None:
+def _validate_gate_artifacts(
+    project: ProjectConfig,
+    gate: str,
+    artifact_ids: Iterable[UUID],
+) -> None:
+    artifacts = {artifact.id: artifact for artifact in project.artifacts}
+    for artifact_id in artifact_ids:
+        artifact = artifacts.get(artifact_id)
+        if artifact is None:
+            raise PipelineError(f"{gate} approval has an unknown artifact")
+        if artifact.stale:
+            raise PipelineError(f"{gate} approval is stale")
+        if artifact.kind not in _GATE_KINDS[gate]:
+            raise PipelineError(f"{gate} approval has the wrong stage")
+        if artifact.kind in STAGES:
+            try:
+                validate_stage_inputs(project, artifact.kind, artifact.dependencies)
+            except PipelineError as exc:
+                raise PipelineError(
+                    f"{gate} approval has invalid direct input dependencies"
+                ) from exc
+
+
+def _validate_stored_approval(
+    project: ProjectConfig, gate: str, approval: Approval
+) -> None:
+    if approval.gate != gate:
+        raise PipelineError(f"{gate} approval has the wrong gate")
+    _validate_gate_artifacts(project, gate, approval.artifact_ids)
     _validate_approval_hashes(project, approval, require_live=True)
 
 

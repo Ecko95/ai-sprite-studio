@@ -24,6 +24,26 @@ _REVISION = "5f4c8b99a1de38a84af7dcc36af80622e5057cd6"
 _HEADER_PREFIX = "<!-- ai-sprite-studio-prompt-provenance:"
 _HEADER_SUFFIX = " -->"
 _TOKEN = re.compile(r"\{([A-Z][A-Z0-9_]*)\}")
+_RESERVED_RECORD_KEYS = frozenset({"text", "job_id"})
+_PROVENANCE_KEYS = frozenset(
+    {
+        "stage_key",
+        "source_repository",
+        "locked_revision",
+        "source_path",
+        "source_sha256",
+        "canonical_substitutions",
+        "correction_ids",
+        "guide",
+        "artifact_inputs",
+        "locked_context",
+        "rendered_sha256",
+    }
+)
+_DIRECTION_SUBSTITUTION_STAGES = frozenset({"directional_anchors", "walk_i2v"})
+_MIRRORED_GENERATION_STAGES = frozenset(
+    {"directional_anchors", "action_poseboards", "walk_i2v"}
+)
 
 
 class PromptError(ValueError):
@@ -52,12 +72,16 @@ class RenderedPrompt:
     def to_record(self) -> dict[str, Any]:
         """Return the JSON object persisted for a rendered prompt."""
 
+        if not isinstance(self.provenance, dict):
+            raise PromptError("rendered prompt provenance must be an object")
+        if _RESERVED_RECORD_KEYS.intersection(self.provenance):
+            raise PromptError("rendered prompt provenance contains a reserved record key")
         if parse_provenance(self.text) != self.provenance:
             raise PromptError("rendered prompt provenance does not match its header")
         _, _, body = self.text.partition("\n")
         if self.provenance.get("rendered_sha256") != self.sha256 or sha256(body.encode()).hexdigest() != self.sha256:
             raise PromptError("rendered prompt hash does not match its body")
-        return {"text": self.text, **self.provenance}
+        return {**self.provenance, "text": self.text}
 
 
 @dataclass(frozen=True)
@@ -158,6 +182,7 @@ def render_prompt(
         raise PromptError("unknown prompt stage") from exc
     source, corrections = _apply_corrections(stage.key, load_source(stage.key))
     canonical = _canonical_substitutions(source, substitutions)
+    _validate_direction_substitution(stage.key, project, canonical, direction)
     rendered_source = _TOKEN.sub(lambda match: canonical[match.group(1)], source)
     if _TOKEN.search(rendered_source):
         raise PromptError("rendered prompt has an unresolved template token")
@@ -231,9 +256,12 @@ def persist_prompt(
         job_id = UUID(str(job_id))
     except (TypeError, ValueError, AttributeError) as exc:
         raise PromptError("invalid job ID") from exc
-    record = rendered.to_record()
-    record["job_id"] = str(job_id)
-    return store.save_prompt(project_id, job_id, record)
+    canonical = _canonical_persisted_prompt(store, project_id, rendered)
+    return store.save_prompt(
+        project_id,
+        job_id,
+        {**canonical.to_record(), "job_id": str(job_id)},
+    )
 
 
 @lru_cache(maxsize=2)
@@ -279,26 +307,106 @@ def _canonical_substitutions(
     return canonical
 
 
+def _validate_direction_substitution(
+    stage_key: str,
+    project: ProjectConfig,
+    substitutions: Mapping[str, str],
+    direction: str | None,
+) -> None:
+    if stage_key in _DIRECTION_SUBSTITUTION_STAGES and "DIRECTION" in substitutions:
+        if direction is None or substitutions["DIRECTION"] != direction:
+            raise PromptError("DIRECTION substitution must match the supplied direction")
+    if (
+        stage_key in _MIRRORED_GENERATION_STAGES
+        and project.side_policy == "mirror"
+        and direction == "left"
+    ):
+        raise PromptError("mirrored projects derive left instead of generating it")
+
+
+def _canonical_persisted_prompt(
+    store: ProjectStore, project_id: UUID | str, rendered: RenderedPrompt
+) -> RenderedPrompt:
+    rendered.to_record()
+    provenance = rendered.provenance
+    if set(provenance) != _PROVENANCE_KEYS:
+        raise PromptError("rendered prompt provenance has invalid keys")
+    stage_key = provenance["stage_key"]
+    if not isinstance(stage_key, str) or stage_key not in STAGES:
+        raise PromptError("rendered prompt has an invalid stage")
+    substitutions = provenance["canonical_substitutions"]
+    if not isinstance(substitutions, Mapping):
+        raise PromptError("rendered prompt substitutions must be a mapping")
+    artifact_inputs = provenance["artifact_inputs"]
+    if not isinstance(artifact_inputs, list):
+        raise PromptError("rendered prompt artifact inputs must be a list")
+    context = provenance["locked_context"]
+    if not isinstance(context, dict):
+        raise PromptError("rendered prompt context must be an object")
+    direction = context.get("direction")
+    if direction is not None and not isinstance(direction, str):
+        raise PromptError("rendered prompt context has an invalid direction")
+    state = context.get("state")
+    if state is None:
+        state_id = None
+    elif isinstance(state, dict) and isinstance(state.get("id"), str):
+        state_id = state["id"]
+    else:
+        raise PromptError("rendered prompt context has an invalid state")
+
+    canonical = render_prompt(
+        stage_key,
+        store.load(project_id),
+        substitutions,
+        direction=direction,
+        state=state_id,
+        artifact_inputs=artifact_inputs,
+    )
+    if (
+        rendered.text != canonical.text
+        or rendered.provenance != canonical.provenance
+        or rendered.sha256 != canonical.sha256
+    ):
+        raise PromptError("rendered prompt does not match the canonical project render")
+    return canonical
+
+
 def _apply_corrections(stage_key: str, source: str) -> tuple[str, tuple[str, ...]]:
+    if stage_key == "base_snap":
+        source = source.replace(
+            "If you snap the south candidate at 96×96 and then snap the *west* anchor "
+            "(a fresh generation) at 102×101, both are correct. Each anchor (N/S/E/W) "
+            "is an independent generation.",
+            "If you snap the down-facing candidate at 96×96 and then snap the *right* anchor "
+            "(a fresh generation) at 102×101, both are correct. Down, right, and up are "
+            "independent generations. For mirrored projects, left is derived by mirroring right. "
+            "For independent-side projects, generate left separately.",
+        )
+        return source, ("direction-policy-right-up-left",)
     if stage_key == "directional_anchors":
         source = source.replace(
             "# 03 — Directional Anchors (NSEW from the snapped south)",
-            "# 03 — Directional Anchors (down/right/up with derived-left)",
+            "# 03 — Directional Anchors (down/right/up with policy-specific left)",
         ).replace(
             "Generate west and north anchors from the snapped south. East is a horizontal flip of west "
             "— don't generate it separately.",
-            "Generate right and up anchors from the snapped south. Left is a horizontal flip of right "
-            "— don't generate it separately.",
+            "Generate right and up anchors from the snapped south. For mirrored projects, left is a "
+            "horizontal flip of right — don't generate it separately. For independent-side projects, "
+            "generate left separately.",
         ).replace(
-            "per direction (W, N)", "per generated direction (right, up)"
+            "per direction (W, N)",
+            "per generated direction (right, up; add left for independent-side projects)",
         ).replace(
-            "`west` / `north`", "`right` / `up`"
+            "`west` / `north`", "`right` / `up`; `left` for independent-side projects"
         ).replace(
             "The W canonical reference used by every action in the west direction:",
             "The right canonical reference used by every action in the right direction:",
         ).replace(
             "![Directional anchors NSEW]",
-            "![Directional anchors (down/right/up/derived-left)]",
+            "![Directional anchors (down/right/up with policy-specific left)]",
+        ).replace(
+            "facing screen-left",
+            "facing screen-right",
         )
         return source, ("direction-policy-right-up-left",)
     if stage_key == "frame_recovery":
