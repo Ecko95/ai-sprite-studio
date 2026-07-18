@@ -115,6 +115,11 @@ async def suite_js(request) -> Response:
     return Response(data, media_type="text/javascript; charset=utf-8")
 
 
+async def studio_css(request) -> Response:
+    data = files("ai_sprite_studio").joinpath("assets/studio.css").read_bytes()
+    return Response(data, media_type="text/css; charset=utf-8")
+
+
 async def normalize(request) -> Response:
     """Auto scale + recenter all frames, or nudge one frame horizontally."""
     project_id = _active(request)
