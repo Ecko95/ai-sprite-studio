@@ -175,11 +175,6 @@ async def upload(request) -> Response:
         return _error("choose one or more images", status_code=400)
     if sum(len(blob) for _, blob in payloads) > _MAX_UPLOAD:
         return _error("upload too large", status_code=400)
-    if density > 1:
-        # Boost before any splitting/stitching: the pixel snap re-quantizes the
-        # upscaled source onto a finer grid (validated; boosting the stitched
-        # chroma row instead degrades pitch detection).
-        payloads = [(name, boost_density(blob, density)) for name, blob in payloads]
 
     project_name = payloads[0][0] or "Upload"
     if len(payloads) > 1:
@@ -199,7 +194,7 @@ async def upload(request) -> Response:
         upload_name = payloads[0][0]
 
     if density > 1:
-        media_type, upload_name = "image/png", "upload.png"
+        data, media_type, upload_name = boost_density(data, density), "image/png", "upload.png"
 
     engine = _engine(request)
     store = request.app.state.store
