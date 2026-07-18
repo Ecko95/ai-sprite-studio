@@ -225,3 +225,16 @@ def test_gif_export_honours_fps_and_loop_overrides(tmp_path):
         bad = client.get("/download/gif?fps=999")
     assert gif.status_code == 200
     assert bad.status_code == 400
+
+
+def test_upload_locks_chroma_key_to_the_row_background(tmp_path):
+    import json as _json
+
+    with _client(tmp_path) as client:
+        _upload(client, frames=2)
+        app = client.app
+        project_id = app.state.curator["project_id"]
+        request = _json.loads(
+            (app.state.store.run_dir(project_id) / "sprite-request.json").read_text()
+        )
+    assert request["chroma_key"]["selection"] == "manual"

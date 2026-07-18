@@ -224,6 +224,7 @@ class SpriteEngine:
         input_artifact_id: UUID | str,
         *,
         frames: int = 1,
+        chroma_key: str = "auto",
     ) -> PreparedSpriteRun:
         """Create a numeric, upload-only component-row run without overwriting it."""
 
@@ -253,7 +254,7 @@ class SpriteEngine:
                 character_id=f"upload-{project.id.hex}",
                 base_image=source_path,
                 request_json=json.dumps(request),
-                chroma_key="auto",
+                chroma_key=chroma_key,
             )
         self._require_success("prepare", result)
 
