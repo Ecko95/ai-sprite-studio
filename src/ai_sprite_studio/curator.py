@@ -23,7 +23,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from .contracts import ProjectConfig
-from .imaging import boost_density, frames_from_sheet, frames_to_gif, frames_to_row, grid_to_row, scale_nearest
+from .imaging import frames_from_sheet, frames_to_gif, frames_to_row, grid_to_row, scale_nearest
 from .project_store import ProjectStoreError
 from .sprite_engine import SpriteEngine, SpriteEngineError
 
@@ -54,7 +54,6 @@ form.addEventListener('submit', async (event) => {
     cols: form.cols.value,
     rows: form.rows.value,
     autosplit: form.autosplit.checked ? '1' : '0',
-    density: form.density ? form.density.value : '1',
   });
   button.disabled = true;
   const started = Date.now();
@@ -162,9 +161,6 @@ async def upload(request) -> Response:
         cols = int(request.query_params.get("cols", "0") or 0)
         rows = int(request.query_params.get("rows", "0") or 0)
         autosplit = request.query_params.get("autosplit") in {"1", "true", "on"}
-        density = float(request.query_params.get("density", "1") or 1)
-        if not 1 <= density <= 2:
-            return _error("density must be between 1 and 2", status_code=400)
         form = await request.form()
         uploads = form.getlist("files")
         payloads = [(part.filename or "frame.png", await part.read()) for part in uploads]
@@ -192,9 +188,6 @@ async def upload(request) -> Response:
         data = payloads[0][1]
         media_type = (uploads[0].content_type or "").split(";")[0].strip()
         upload_name = payloads[0][0]
-
-    if density > 1:
-        data, media_type, upload_name = boost_density(data, density), "image/png", "upload.png"
 
     engine = _engine(request)
     store = request.app.state.store

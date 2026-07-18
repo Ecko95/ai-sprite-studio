@@ -165,20 +165,6 @@ def nudge_frame(pixel: bytes, plain: bytes | None, dx: int) -> tuple[bytes, byte
     return results[0], results[1]
 
 
-def boost_density(data: bytes, factor: float) -> bytes:
-    """Pre-snap LANCZOS upscale of a source row/sheet before extraction.
-
-    The pixel snap recovers logical pixels at native pitch; small factors get
-    cancelled by pitch detection, but ~1.5 makes it re-quantize onto a finer
-    grid so the sprite fills more of the 256px cell (higher density).
-    """
-    if factor <= 1:
-        return data
-    with Image.open(BytesIO(data)) as opened:
-        img = opened.convert("RGB")
-    return _png(img.resize((round(img.width * factor), round(img.height * factor)), Image.LANCZOS))
-
-
 def scale_nearest(data: bytes, factor: int) -> bytes:
     """Integer nearest-neighbour upscale of one RGBA frame (pixel-perfect)."""
     if factor <= 1:
