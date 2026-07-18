@@ -161,7 +161,7 @@ async def _root(request):
         "<p><label><input type=\"checkbox\" name=\"autosplit\"> Sprite sheet &mdash; auto-detect frames</label> "
         "<small>recommended for a sheet: finds frames by background gaps, ignores empty rows/margins</small></p>"
         "<p><label>Frames <input type=\"number\" name=\"frames\" value=\"4\" "
-        "min=\"1\" max=\"12\"></label> <small>ignored for multiple files / auto-detect</small></p>"
+        "min=\"1\" max=\"15\"></label> <small>ignored for multiple files / auto-detect</small></p>"
         "<p><label>Grid cols <input type=\"number\" name=\"cols\" value=\"0\" min=\"0\" max=\"12\" style=\"width:4em\"></label> "
         "<label>rows <input type=\"number\" name=\"rows\" value=\"0\" min=\"0\" max=\"12\" style=\"width:4em\"></label> "
         "<small>manual grid fallback; leave 0 if using auto-detect</small></p>"

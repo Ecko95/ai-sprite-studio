@@ -227,8 +227,8 @@ class SpriteEngine:
     ) -> PreparedSpriteRun:
         """Create a numeric, upload-only component-row run without overwriting it."""
 
-        if isinstance(frames, bool) or not isinstance(frames, int) or not 1 <= frames <= 12:
-            raise SpriteEngineError("upload frame count must be between 1 and 12")
+        if isinstance(frames, bool) or not isinstance(frames, int) or not 1 <= frames <= 15:
+            raise SpriteEngineError("upload frame count must be between 1 and 15")
         project = self.store.load(project_id)
         source = self._input_artifact(project.id, input_artifact_id)
         run_dir = self.store.run_dir(project.id)

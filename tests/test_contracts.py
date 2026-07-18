@@ -117,7 +117,7 @@ def test_projects_keep_the_six_core_states_when_custom_states_are_added():
 
 @pytest.mark.parametrize(
     ("frames", "fps"),
-    [(1, 1), (12, 30)],
+    [(1, 1), (15, 30)],
 )
 def test_custom_states_allow_the_documented_boundaries(frames, fps):
     state = StateSpec(
@@ -134,7 +134,7 @@ def test_custom_states_allow_the_documented_boundaries(frames, fps):
     assert state.fps == fps
 
 
-@pytest.mark.parametrize(("frames", "fps"), [(0, 10), (13, 10), (2, 0), (2, 31)])
+@pytest.mark.parametrize(("frames", "fps"), [(0, 10), (16, 10), (2, 0), (2, 31)])
 def test_custom_states_reject_outside_the_documented_boundaries(frames, fps):
     with pytest.raises(ValidationError):
         StateSpec(
