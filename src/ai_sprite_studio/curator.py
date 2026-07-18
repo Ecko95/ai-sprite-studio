@@ -19,6 +19,7 @@ import json
 from uuid import UUID
 import zipfile
 
+from PIL import Image
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
@@ -192,10 +193,18 @@ async def upload(request) -> Response:
     engine = _engine(request)
     store = request.app.state.store
 
+    # Lock the chroma key to the actual background colour: the vendored snap's
+    # auto mode may pick a different key (e.g. cyan over a green sheet) and its
+    # background repaint doesn't apply on upload rows, leaving the background
+    # opaque in every extracted frame.
+    with Image.open(BytesIO(data)) as opened:
+        corner = opened.convert("RGB").getpixel((0, 0))
+    chroma_key = "#{:02X}{:02X}{:02X}".format(*corner)
+
     def run() -> UUID:
         project = store.create(ProjectConfig(name=project_name))
         uploaded = engine.ingest_upload(project.id, data, media_type=media_type, filename=upload_name)
-        engine.prepare(project.id, uploaded.id, frames=frames)
+        engine.prepare(project.id, uploaded.id, frames=frames, chroma_key=chroma_key)
         engine.extract(project.id, segmentation=segmentation)
         return project.id
 
