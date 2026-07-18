@@ -438,6 +438,131 @@ class SpriteEngine:
         )
 
     @_serialized_engine_mutation
+    def normalize(
+        self, project_id: UUID | str, *, nudge: tuple[int, int] | None = None
+    ) -> ExtractionResult:
+        """Auto scale + recenter every extracted frame, or nudge one frame sideways.
+
+        Rewrites the canonical pixel frames (and their plain display twins) in
+        place: shared nearest-neighbour integer scale, horizontal centre, foot
+        baseline locked to the cell bottom. Resets curation and any composed
+        atlas, since the frames they were stamped against changed.
+        """
+        from .imaging import normalize_frames, nudge_frame
+
+        project = self.store.load(project_id)
+        run_dir, state = self._extracted_state(project.id)
+        source_id = self._state_uuid(state, "input_artifact_id")
+        request_id = self._state_uuid(state, "request_artifact_id")
+        self._current_pixel_dependencies(project.id, run_dir, state)
+        files = self._relative_files(state.get("pixel_files"), "pixel frames")
+        manifest_path = self._run_file(run_dir, "frames/frames-manifest.json")
+        manifest = self._json_file(manifest_path, "sprite extraction report")
+        row = next((item for item in manifest.get("rows", []) if item.get("state") == _UPLOAD_STATE), None)
+        if not isinstance(row, dict):
+            raise SpriteEngineError("sprite run has not been extracted")
+        plain_files = self._relative_files(row.get("plain_files"), "plain frames")
+        if len(plain_files) != len(files):
+            raise SpriteEngineError("sprite extraction did not preserve frame twins")
+
+        pixel_paths = [self._run_file(run_dir, item) for item in files]
+        plain_paths = [self._run_file(run_dir, item) for item in plain_files]
+        pixels = [path.read_bytes() for path in pixel_paths]
+        plains = [path.read_bytes() for path in plain_paths]
+        if nudge is None:
+            pixels, plains = normalize_frames(pixels, plains)
+        else:
+            index, dx = nudge
+            if not 0 <= index < len(pixels):
+                raise SpriteEngineError("invalid frame index")
+            moved_pixel, moved_plain = nudge_frame(pixels[index], plains[index], dx)
+            pixels[index] = moved_pixel
+            if moved_plain is not None:
+                plains[index] = moved_plain
+
+        shared_palette: set[tuple[int, int, int]] = set()
+        for data in pixels:
+            with Image.open(BytesIO(data)) as opened:
+                shared_palette.update(self._validate_canonical_image(opened.convert("RGBA"), "normalized sprite frame"))
+        if len(shared_palette) > 12:
+            raise SpriteEngineError("canonical sprite frames exceed the shared palette")
+
+        for path, data in zip((*pixel_paths, *plain_paths), (*pixels, *plains), strict=True):
+            path.write_bytes(data)
+        try:
+            (run_dir / "curation.json").unlink(missing_ok=True)
+        except OSError as exc:
+            raise SpriteEngineError("sprite curation state could not be reset") from exc
+
+        plain_ids: list[UUID] = []
+        pixel_ids: list[UUID] = []
+        for plain_data, pixel_data in zip(plains, pixels, strict=True):
+            plain_ids.append(
+                self._put_artifact(
+                    project.id,
+                    plain_data,
+                    kind="sprite_frame",
+                    media_type="image/png",
+                    variant="plain",
+                    dependencies=(source_id, request_id),
+                    width=256,
+                    height=256,
+                ).id
+            )
+            pixel_ids.append(
+                self._put_artifact(
+                    project.id,
+                    pixel_data,
+                    kind="sprite_frame",
+                    media_type="image/png",
+                    variant="pixel",
+                    dependencies=(source_id, request_id),
+                    width=256,
+                    height=256,
+                ).id
+            )
+
+        preview_result = self._invoke("preview", sprite_preview.run, run_dir=run_dir)
+        self._require_success("preview", preview_result)
+        preview_ids: list[UUID] = []
+        preview_files = ("qa/upload-contact.png", "qa/upload.gif", "qa/all-contact.png")
+        for relative_path in preview_files:
+            preview_path = self._run_file(run_dir, relative_path)
+            preview_ids.append(
+                self._put_artifact(
+                    project.id,
+                    preview_path.read_bytes(),
+                    kind="sprite_preview",
+                    media_type="image/gif" if preview_path.suffix == ".gif" else "image/png",
+                    variant="preview",
+                    dependencies=tuple(pixel_ids),
+                ).id
+            )
+
+        self._write_state(
+            run_dir,
+            {
+                "input_artifact_id": str(source_id),
+                "request_artifact_id": str(request_id),
+                "plain_artifact_ids": [str(item) for item in plain_ids],
+                "pixel_artifact_ids": [str(item) for item in pixel_ids],
+                "pixel_files": list(files),
+                "preview_artifact_ids": [str(item) for item in preview_ids],
+                "extract_report_artifact_id": str(self._state_uuid(state, "extract_report_artifact_id")),
+            },
+        )
+        return ExtractionResult(
+            raw_artifact_id=source_id,
+            plain_artifact_ids=tuple(plain_ids),
+            pixel_artifact_ids=tuple(pixel_ids),
+            preview_artifact_ids=tuple(preview_ids),
+            report_artifact_id=self._state_uuid(state, "extract_report_artifact_id"),
+            selected_chroma=str(self._request(run_dir)["chroma_key"]["hex"]),
+            outputs=tuple(files),
+            diagnostics={},
+        )
+
+    @_serialized_engine_mutation
     def load_curation(self, project_id: UUID | str) -> CurationSnapshot:
         """Load the current upstream curation sidecar and its generation revision."""
 
