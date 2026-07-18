@@ -158,7 +158,7 @@ def test_curator_assets_and_page_are_served(tmp_path):
     assert "/api/curation" in script.text
 
 
-def test_download_atlas_composes_and_export_defers(tmp_path):
+def test_download_atlas_composes(tmp_path):
     with _client(tmp_path) as client:
         _upload(client, frames=2)
         atlas = client.get("/download/atlas")
@@ -167,7 +167,7 @@ def test_download_atlas_composes_and_export_defers(tmp_path):
     assert atlas.status_code == 200
     assert atlas.headers["content-type"] == "image/png"
     assert atlas.headers["x-filename"] == "sprite-sheet-alpha.png"
-    assert pngs.status_code == 501
+    assert pngs.status_code == 200
 
 
 def test_curator_page_injects_the_editing_suite(tmp_path):
@@ -193,3 +193,26 @@ def test_normalize_endpoint_rewrites_frames_and_bumps_revision(tmp_path):
     assert bad.status_code == 400
     assert after["runRevision"] != before["runRevision"]
     assert after["states"][0]["frames"][0]["url"] != before["states"][0]["frames"][0]["url"]
+
+
+def test_download_pngs_and_gif_exports(tmp_path):
+    import zipfile as _zipfile
+    from io import BytesIO as _BytesIO
+    from PIL import Image as _Image
+
+    with _client(tmp_path) as client:
+        _upload(client, frames=2)
+        pngs = client.get("/download/pngs")
+        gif = client.get("/download/gif?state=upload")
+        bad = client.get("/download/nope")
+    assert pngs.status_code == 200 and pngs.headers["X-Filename"].endswith(".zip")
+    with _zipfile.ZipFile(_BytesIO(pngs.content)) as bundle:
+        names = bundle.namelist()
+        assert names == ["frame-00.png", "frame-01.png"]
+        with _Image.open(_BytesIO(bundle.read(names[0]))) as frame:
+            assert frame.size == (1024, 1024)  # 256 x default scale 4, nearest neighbour
+    assert gif.status_code == 200 and gif.headers["Content-Type"] == "image/gif"
+    with _Image.open(_BytesIO(gif.content)) as animation:
+        # identical consecutive frames may be merged by the GIF encoder
+        assert animation.n_frames >= 1 and animation.size == (512, 512)
+    assert bad.status_code == 404
