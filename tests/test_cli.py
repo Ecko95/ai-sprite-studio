@@ -156,6 +156,27 @@ def test_genbase_dry_run_emits_prompt_without_provider_or_store(tmp_path, capsys
     assert out.with_suffix(".png.prompt.md").read_text()  # provenance sidecar written
 
 
+def test_combine_stitches_independent_frames_into_a_row(tmp_path):
+    # Three differently-sized frames; each must land in its own equal cell, in order.
+    sizes = [(20, 30), (16, 24), (12, 30)]
+    paths = []
+    for index, (w, h) in enumerate(sizes):
+        img = Image.new("RGB", (w, h), (index * 20 + 20, 0, 0))
+        path = tmp_path / f"f{index}.png"
+        img.save(path)
+        paths.append(path)
+
+    out = tmp_path / "row.png"
+    assert cli.combine(sources=paths, out=out) == 0
+
+    result = Image.open(out).convert("RGB")
+    cell_w, cell_h = max(w for w, _ in sizes), max(h for _, h in sizes)  # 20 x 30
+    assert result.size == (cell_w * 3, cell_h)
+    # Each cell centre holds its frame colour, left-to-right in the given order.
+    for index in range(3):
+        assert result.getpixel((index * cell_w + cell_w // 2, cell_h // 2)) == (index * 20 + 20, 0, 0)
+
+
 def test_regrid_reshapes_grid_into_a_single_row_in_reading_order(tmp_path):
     # 4x3 grid, each cell filled with a unique colour keyed to its reading index.
     cols, rows, cell = 4, 3, 10

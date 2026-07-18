@@ -111,6 +111,40 @@ def _grid_to_row(data: bytes, *, cols: int, rows: int, frames: int) -> bytes:
     return buffer.getvalue()
 
 
+def _frames_to_row(frames: list[bytes]) -> bytes:
+    """Lay independent frame images side by side into one 1xN row.
+
+    Frames are normalised to the largest common cell (centred on chroma green), so
+    per-frame sizes can differ; the snap re-centers each frame anyway.
+    """
+    from PIL import Image
+
+    images = []
+    for data in frames:
+        with Image.open(BytesIO(data)) as opened:
+            images.append(opened.convert("RGB"))
+    cell_w = max(image.width for image in images)
+    cell_h = max(image.height for image in images)
+    strip = Image.new("RGB", (cell_w * len(images), cell_h), _CHROMA)
+    for index, image in enumerate(images):
+        offset_x = index * cell_w + (cell_w - image.width) // 2
+        offset_y = (cell_h - image.height) // 2
+        strip.paste(image, (offset_x, offset_y))
+    buffer = BytesIO()
+    strip.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def combine(*, sources: list[Path], out: Path) -> int:
+    if not sources:
+        print("combine needs at least one image", file=sys.stderr)
+        return 1
+    out = Path(out)
+    out.write_bytes(_frames_to_row([Path(source).read_bytes() for source in sources]))
+    print(f"wrote {out}  (1x{len(sources)} row; upload with frames={len(sources)})")
+    return 0
+
+
 def regrid(*, source: Path, out: Path, cols: int, rows: int, frames: int) -> int:
     if not 1 <= frames <= cols * rows:
         print(f"--frames must be 1..{cols * rows} for a {cols}x{rows} grid", file=sys.stderr)
@@ -346,6 +380,10 @@ def main(argv: list[str] | None = None) -> int:
     act_parser.add_argument("--quality", default="high", choices=["low", "medium", "high", "auto"])
     act_parser.add_argument("--dry-run", dest="dry_run", action="store_true", help="print the ready-to-paste prompt (no provider call, no key); for manual ChatGPT/Codex generation")
 
+    combine_parser = commands.add_parser("combine", help="stitch individual frame images (or rows) into one 1xN row the snap can read")
+    combine_parser.add_argument("sources", type=Path, nargs="+", metavar="IMAGE", help="frame images in order")
+    combine_parser.add_argument("--out", type=Path, default=Path("row.png"))
+
     regrid_parser = commands.add_parser("regrid", help="reshape an NxM grid pose board into a 1xN row the snap can read")
     regrid_parser.add_argument("--in", dest="source", type=Path, required=True)
     regrid_parser.add_argument("--out", type=Path, default=Path("row.png"))
@@ -360,6 +398,8 @@ def main(argv: list[str] | None = None) -> int:
     prep_parser.add_argument("--pad", type=float, default=0.1, help="green margin as a fraction of the longest side; 0 keeps size")
 
     arguments = parser.parse_args(argv)
+    if arguments.command == "combine":
+        return combine(sources=arguments.sources, out=arguments.out)
     if arguments.command == "regrid":
         return regrid(source=arguments.source, out=arguments.out, cols=arguments.cols, rows=arguments.rows, frames=arguments.frames)
     if arguments.command == "prep":

@@ -145,6 +145,18 @@ the locked presets. `--direction` is `down` only until directional anchors exist
 board is an **intermediate** — recover + snap its frames via the frame-recovery stage;
 never grid-crop it (poses cross cell borders by design). Spends OpenAI credits.
 
+### Assemble frames image-by-image (`combine`)
+
+If you have each frame as a **separate image** (or several rows/sheets to join),
+`combine` stitches them into one 1×N row in the order given (each normalised to the
+largest common cell on chroma green):
+
+```bash
+uv run ai-sprite-studio combine --out row.png frame1.png frame2.png frame3.png
+```
+
+Then upload `row.png` with **frames = N**.
+
 ### Reshape a grid pose board into a row (`regrid`)
 
 The snap is a **component-row** engine — it reads frames from a **single horizontal
