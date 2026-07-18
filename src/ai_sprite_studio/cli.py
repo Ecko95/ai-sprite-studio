@@ -146,7 +146,7 @@ def _codex_image_bytes(prompt: str, *, images: tuple[bytes, ...] = (), timeout: 
             "Do not ask for confirmation. Report the saved path."
         )
         before = _codex_generated_pngs()
-        subprocess.run(
+        result = subprocess.run(
             ["codex", "exec", "-s", "workspace-write", "-C", str(work), "--skip-git-repo-check", *image_flags, instruction],
             timeout=timeout,
             capture_output=True,
@@ -157,7 +157,9 @@ def _codex_image_bytes(prompt: str, *, images: tuple[bytes, ...] = (), timeout: 
         fresh = [path for path in _codex_generated_pngs() if path not in before]
         if fresh:
             return max(fresh, key=lambda path: path.stat().st_mtime).read_bytes()
-        raise RuntimeError("codex exec produced no image (is `codex login` done and image_gen available?)")
+        tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
+        detail = " | ".join(tail) if tail else "no output"
+        raise RuntimeError(f"codex exec produced no image (run `codex login`?): {detail}")
 
 
 def _codex_generated_pngs() -> list[Path]:
