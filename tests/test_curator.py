@@ -168,3 +168,28 @@ def test_download_atlas_composes_and_export_defers(tmp_path):
     assert atlas.headers["content-type"] == "image/png"
     assert atlas.headers["x-filename"] == "sprite-sheet-alpha.png"
     assert pngs.status_code == 501
+
+
+def test_curator_page_injects_the_editing_suite(tmp_path):
+    with _client(tmp_path) as client:
+        _upload(client, frames=2)
+        page = client.get("/curator")
+        js = client.get("/curator/suite.js")
+    assert "/curator/suite.js" in page.text
+    assert js.status_code == 200 and "auto scale + recenter" in js.text
+
+
+def test_normalize_endpoint_rewrites_frames_and_bumps_revision(tmp_path):
+    with _client(tmp_path) as client:
+        _upload(client, frames=2)
+        before = client.get("/api/run").json()
+        auto = client.post("/curator/normalize?op=auto", headers={"Origin": "http://127.0.0.1"})
+        nudged = client.post(
+            "/curator/normalize?op=nudge&index=0&dx=-4", headers={"Origin": "http://127.0.0.1"}
+        )
+        bad = client.post("/curator/normalize?op=nudge&index=zzz&dx=2", headers={"Origin": "http://127.0.0.1"})
+        after = client.get("/api/run").json()
+    assert auto.status_code == 200 and nudged.status_code == 200
+    assert bad.status_code == 400
+    assert after["runRevision"] != before["runRevision"]
+    assert after["states"][0]["frames"][0]["url"] != before["states"][0]["frames"][0]["url"]
