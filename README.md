@@ -110,9 +110,19 @@ uv run ai-sprite-studio genbase --concept "..." --project <existing-project-id> 
 ```
 
 `--costume` and `--silhouette` refine the identity tokens; `--model`/`--quality`
-override the defaults. This spends OpenAI credits — it is the only path here that
-calls a provider. Feed the result into `SpriteEngine.prepare(...)` → `extract(...)`
-to snap it to the grid.
+override the defaults. Feed the result into `SpriteEngine.prepare(...)` →
+`extract(...)` to snap it to the grid.
+
+**Provider** — `--provider openai` (default) calls the OpenAI Images API and needs
+`OPENAI_API_KEY`. `--provider codex` shells out to `codex exec "$imagegen ..."`,
+which runs the Codex built-in `image_gen` tool (`gpt-image-2`) on **your ChatGPT
+login — no API key**. Requires the Codex CLI installed and `codex login` done; expect
+~4-6 min per image (Codex reasons before the image tool fires). Works on `genactions`
+too (the anchor + guide are attached with `codex exec -i`).
+
+```bash
+uv run ai-sprite-studio genbase --provider codex --concept "..." --out base.png
+```
 
 ### Generate an action pose board (gpt-image)
 

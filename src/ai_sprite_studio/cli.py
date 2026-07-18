@@ -9,7 +9,9 @@ import os
 from pathlib import Path
 import re
 import socket
+import subprocess
 import sys
+import tempfile
 import webbrowser
 
 import uvicorn
@@ -121,6 +123,54 @@ _FRAME_SCRIPTS = {
 }
 _GENERIC_SCRIPT = "A {N}-frame {ACTION} sequence that reads as one coherent short animation, with the first and last frames bookending the motion."
 _DEFAULT_ACTION_CONSTRAINTS = "Keep body proportions, palette, and outfit identical across every frame. No motion blur, no smear frames, no weapon trails. Each pose sits fully inside its cell area."
+
+
+def _codex_image_bytes(prompt: str, *, images: tuple[bytes, ...] = (), timeout: int = 900) -> bytes:
+    """Generate via `codex exec` built-in image_gen — ChatGPT login, no API key.
+
+    ponytail: codex reasons before the image tool fires, so expect ~4-6 min/image.
+    The built-in tool saves under $CODEX_HOME/generated_images; we coax a copy to an
+    exact path via the prompt and read it, falling back to the newest generated file.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        work = Path(directory)
+        target = work / "out.png"
+        image_flags: list[str] = []
+        for index, data in enumerate(images):
+            path = work / f"input_{index}.png"
+            path.write_bytes(data)
+            image_flags += ["-i", str(path)]
+        instruction = (
+            f"$imagegen {prompt}\n\n"
+            f"Save the single final PNG to exactly {target} (copy it there). "
+            "Do not ask for confirmation. Report the saved path."
+        )
+        before = _codex_generated_pngs()
+        subprocess.run(
+            ["codex", "exec", "-s", "workspace-write", "-C", str(work), "--skip-git-repo-check", *image_flags, instruction],
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+        )
+        if target.exists():
+            return target.read_bytes()
+        fresh = [path for path in _codex_generated_pngs() if path not in before]
+        if fresh:
+            return max(fresh, key=lambda path: path.stat().st_mtime).read_bytes()
+        raise RuntimeError("codex exec produced no image (is `codex login` done and image_gen available?)")
+
+
+def _codex_generated_pngs() -> list[Path]:
+    home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    return list((home / "generated_images").glob("*.png"))
+
+
+def _codex_generate(prompt: str, *, model: str, quality: str) -> bytes:
+    return _codex_image_bytes(prompt)
+
+
+def _codex_edit(prompt: str, images: list[bytes], *, model: str, size: str, quality: str) -> bytes:
+    return _codex_image_bytes(prompt, images=tuple(images))
 
 
 def _openai_edit_bytes(prompt: str, images: list[bytes], *, model: str, size: str, quality: str) -> bytes:
@@ -276,6 +326,7 @@ def main(argv: list[str] | None = None) -> int:
     gen_parser.add_argument("--out", type=Path, default=Path("base.png"))
     gen_parser.add_argument("--model", default="gpt-image-1")
     gen_parser.add_argument("--quality", default="high", choices=["low", "medium", "high", "auto"])
+    gen_parser.add_argument("--provider", default="openai", choices=["openai", "codex"], help="codex uses your ChatGPT login via `codex exec` (no API key)")
 
     act_parser = commands.add_parser("genactions", help="build the full-spec action-sheet prompt and generate a pose board with gpt-image")
     act_parser.add_argument("--workspace", type=Path, default=default_workspace())
@@ -288,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
     act_parser.add_argument("--out", type=Path, default=Path("poseboard.png"))
     act_parser.add_argument("--model", default="gpt-image-1")
     act_parser.add_argument("--quality", default="high", choices=["low", "medium", "high", "auto"])
+    act_parser.add_argument("--provider", default="openai", choices=["openai", "codex"], help="codex uses your ChatGPT login via `codex exec` (no API key)")
 
     prep_parser = commands.add_parser("prep", help="strip a flat background to chroma green so an existing image snaps cleanly")
     prep_parser.add_argument("--in", dest="source", type=Path, required=True)
@@ -310,6 +362,7 @@ def main(argv: list[str] | None = None) -> int:
             out=arguments.out,
             model=arguments.model,
             quality=arguments.quality,
+            _generate=_codex_edit if arguments.provider == "codex" else _openai_edit_bytes,
         )
     if arguments.command == "genbase":
         return genbase(
@@ -322,6 +375,7 @@ def main(argv: list[str] | None = None) -> int:
             model=arguments.model,
             quality=arguments.quality,
             project_id=arguments.project_id,
+            _generate=_codex_generate if arguments.provider == "codex" else _openai_image_bytes,
         )
     serve(arguments.workspace, arguments.port)
     return 0

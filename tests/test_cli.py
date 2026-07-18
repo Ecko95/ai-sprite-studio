@@ -2,6 +2,7 @@ import http.client
 import io
 import os
 import re
+from pathlib import Path
 import select
 import signal
 import subprocess
@@ -127,6 +128,29 @@ def test_genactions_builds_the_action_prompt_and_feeds_anchor_plus_guide(tmp_pat
     assert len(captured["images"]) == 2 and captured["images"][0] == store.read_artifact_bytes(project.id, anchor.id)
     assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
     assert out.with_suffix(".png.prompt.md").exists()
+
+
+def test_codex_provider_shells_out_and_reads_the_saved_png(tmp_path, monkeypatch):
+    calls = {}
+
+    def fake_run(cmd, **kwargs):
+        calls["cmd"] = cmd
+        # codex is told to save to the -C working dir; write out.png there.
+        work = Path(cmd[cmd.index("-C") + 1])
+        img = io.BytesIO()
+        Image.new("RGB", (1024, 1024), "#00FF00").save(img, format="PNG")
+        (work / "out.png").write_bytes(img.getvalue())
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    anchor = b"anchor-bytes"
+    data = cli._codex_image_bytes("draw a ghost", images=(anchor,))
+
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    assert calls["cmd"][:3] == ["codex", "exec", "-s"]
+    assert "$imagegen draw a ghost" in calls["cmd"][-1]
+    assert "-i" in calls["cmd"]  # the anchor image is attached
 
 
 def test_prep_floods_border_background_to_chroma_and_keeps_interior(tmp_path):
