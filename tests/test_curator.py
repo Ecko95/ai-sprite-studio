@@ -24,6 +24,15 @@ def test_landing_serves_the_upload_form(tmp_path):
     assert "/curator/upload.js" in page.text
 
 
+def test_landing_links_the_studio_stylesheet(tmp_path):
+    with _client(tmp_path) as client:
+        page = client.get("/")
+        css = client.get("/studio.css")
+    assert 'href="/studio.css"' in page.text
+    assert css.status_code == 200
+    assert css.headers["content-type"].startswith("text/css")
+
+
 def test_upload_extracts_and_run_snapshot_lists_frames(tmp_path):
     with _client(tmp_path) as client:
         uploaded = _upload(client, frames=2)

@@ -152,25 +152,32 @@ async def _root(request):
     response = HTMLResponse(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         f"<meta name=\"csrf-token\" content=\"{escape(csrf_token)}\">"
-        "<title>AI Sprite Studio</title></head><body><main><h1>AI Sprite Studio</h1>"
-        "<p>Upload one image, a sprite sheet, or several per-frame images, then curate.</p>"
-        "<form id=\"upload\">"
-        "<p><label>Image(s) <input type=\"file\" name=\"file\" multiple "
-        "accept=\"image/png,image/jpeg,image/webp\" required></label> "
-        "<small>pick multiple = one image per frame</small></p>"
-        "<p><label><input type=\"checkbox\" name=\"autosplit\"> Sprite sheet &mdash; auto-detect frames</label> "
-        "<small>recommended for a sheet: finds frames by background gaps, ignores empty rows/margins</small></p>"
-        "<p><label>Frames <input type=\"number\" name=\"frames\" value=\"4\" "
-        "min=\"1\" max=\"12\"></label> <small>ignored for multiple files / auto-detect</small></p>"
-        "<p><label>Grid cols <input type=\"number\" name=\"cols\" value=\"0\" min=\"0\" max=\"12\" style=\"width:4em\"></label> "
-        "<label>rows <input type=\"number\" name=\"rows\" value=\"0\" min=\"0\" max=\"12\" style=\"width:4em\"></label> "
-        "<small>manual grid fallback; leave 0 if using auto-detect</small></p>"
-        "<p><label>Segmentation <select name=\"segmentation\">"
+        "<title>AI Sprite Studio</title>"
+        "<link rel=\"stylesheet\" href=\"/studio.css\"></head><body>"
+        "<main class=\"studio\">"
+        "<header class=\"studio-head\"><h1>AI Sprite Studio</h1>"
+        "<p class=\"tagline\">Upload one image, a sprite sheet, or several per-frame images, then curate.</p></header>"
+        "<form id=\"upload\" class=\"card\">"
+        "<div class=\"field dropzone\"><label>Image(s)"
+        "<input type=\"file\" name=\"file\" multiple accept=\"image/png,image/jpeg,image/webp\" required></label>"
+        "<small class=\"hint\">pick multiple = one image per frame</small></div>"
+        "<div class=\"field check-row\"><label><input type=\"checkbox\" name=\"autosplit\"> Sprite sheet &mdash; auto-detect frames</label>"
+        "<small class=\"hint\">recommended for a sheet: finds frames by background gaps, ignores empty rows/margins</small></div>"
+        "<div class=\"field num-row\"><label>Frames</label>"
+        "<div class=\"controls\"><input type=\"number\" name=\"frames\" value=\"4\" min=\"1\" max=\"12\"></div>"
+        "<small class=\"hint\">ignored for multiple files / auto-detect</small></div>"
+        "<div class=\"field num-row\"><label>Manual grid</label>"
+        "<div class=\"controls\">"
+        "<label>cols <input type=\"number\" name=\"cols\" value=\"0\" min=\"0\" max=\"12\"></label>"
+        "<label>rows <input type=\"number\" name=\"rows\" value=\"0\" min=\"0\" max=\"12\"></label></div>"
+        "<small class=\"hint\">manual grid fallback; leave 0 if using auto-detect</small></div>"
+        "<div class=\"field\"><label>Segmentation</label>"
+        "<select name=\"segmentation\">"
         "<option value=\"components\">components</option>"
-        "<option value=\"projection\">projection</option></select></label></p>"
-        "<p><button type=\"submit\">Upload &amp; extract</button></p></form>"
+        "<option value=\"projection\">projection</option></select></div>"
+        "<div class=\"submit-row\"><button type=\"submit\">Upload &amp; extract</button></div></form>"
         "<p id=\"status\" role=\"status\"></p>"
-        "<p><a href=\"/curator\">Open curator</a> (after uploading)</p>"
+        "<p class=\"curator-link\"><a href=\"/curator\">Open curator</a> (after uploading)</p>"
         "<script src=\"/curator/upload.js\"></script>"
         "</main></body></html>"
     )
@@ -219,6 +226,7 @@ def create_app(workspace: str | Path, handler: JobHandler | None = None) -> Star
             Route("/curator/upload.js", curator.upload_js),
             Route("/curator/upload", curator.upload, methods=["POST"]),
             Route("/curator/suite.js", curator.suite_js),
+            Route("/studio.css", curator.studio_css),
             Route("/curator/normalize", curator.normalize, methods=["POST"]),
             Route("/curator", curator.curator_index),
             Route("/curator.js", curator.curator_asset),
