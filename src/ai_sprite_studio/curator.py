@@ -21,7 +21,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from .contracts import ProjectConfig
-from .imaging import frames_to_row, grid_to_row
+from .imaging import frames_from_sheet, frames_to_row, grid_to_row
 from .project_store import ProjectStoreError
 from .sprite_engine import SpriteEngine, SpriteEngineError
 
@@ -51,6 +51,7 @@ form.addEventListener('submit', async (event) => {
     segmentation: form.segmentation.value,
     cols: form.cols.value,
     rows: form.rows.value,
+    autosplit: form.autosplit.checked ? '1' : '0',
   });
   button.disabled = true;
   const started = Date.now();
@@ -111,17 +112,19 @@ async def curator_asset(request) -> Response:
 
 
 async def upload(request) -> Response:
-    """Ingest one image, a grid sheet, or many per-frame images into one snap row.
+    """Ingest one image, a sprite sheet, or many per-frame images into one snap row.
 
-    - Multiple files  -> stitched into a 1xN row (frames = file count).
+    - Multiple files      -> stitched into a 1xN row (frames = file count).
+    - One file + autosplit -> frames auto-detected by background gaps (any layout).
     - One file + cols&rows -> grid reshaped into a row (frames = filled cells).
-    - One file, no grid -> used as-is (a single frame or an existing row).
+    - One file, none set   -> used as-is (a single frame or an existing row).
     """
     try:
         frames = int(request.query_params.get("frames", "1"))
         segmentation = request.query_params.get("segmentation", "components")
         cols = int(request.query_params.get("cols", "0") or 0)
         rows = int(request.query_params.get("rows", "0") or 0)
+        autosplit = request.query_params.get("autosplit") in {"1", "true", "on"}
         form = await request.form()
         uploads = form.getlist("files")
         payloads = [(part.filename or "frame.png", await part.read()) for part in uploads]
@@ -136,6 +139,11 @@ async def upload(request) -> Response:
     project_name = payloads[0][0] or "Upload"
     if len(payloads) > 1:
         data, media_type, upload_name, frames = frames_to_row([blob for _, blob in payloads]), "image/png", "upload.png", len(payloads)
+    elif autosplit:
+        detected = frames_from_sheet(payloads[0][1])
+        if not detected:
+            return _error("no frames detected on the sheet (is the background a flat colour?)", status_code=400)
+        data, media_type, upload_name, frames = frames_to_row(detected), "image/png", "upload.png", len(detected)
     elif cols > 0 and rows > 0:
         if not 1 <= frames <= cols * rows:
             frames = cols * rows

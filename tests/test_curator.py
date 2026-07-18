@@ -59,6 +59,20 @@ def test_upload_multiple_files_become_one_row_of_frames(tmp_path):
     assert len(state["frames"]) == 3  # 3 separate images -> 3 frames
 
 
+def test_upload_autosplit_detects_frames_on_a_sheet(tmp_path):
+    # A 3-frame sheet posted with autosplit=1 (frames field left at default 4):
+    # auto-detection by background gaps must recover 3, not obey the frames field.
+    with _client(tmp_path) as client:
+        resp = client.post(
+            "/curator/upload?autosplit=1&frames=4&segmentation=components",
+            files={"files": ("sheet.png", _strip_png(frames=3), "image/png")},
+            headers={"Origin": "http://127.0.0.1"},
+        )
+        run = client.get("/api/run").json()
+    assert resp.status_code == 201
+    assert len(run["states"][0]["frames"]) == 3
+
+
 def test_upload_single_grid_sheet_reshapes_via_cols_rows(tmp_path):
     with _client(tmp_path) as client:
         resp = client.post(

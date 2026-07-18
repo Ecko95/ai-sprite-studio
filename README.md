@@ -164,6 +164,21 @@ uv run ai-sprite-studio combine --out row.png frame1.png frame2.png frame3.png
 
 Then upload `row.png` with **frames = N**.
 
+### Auto-detect frames on a sprite sheet (`autosplit`)
+
+`autosplit` finds frames on a sheet by its **background gaps** — no cols/rows to
+guess. It samples the background colour, then splits into content row-bands and
+column-segments, so outer margins, uneven spacing, and empty rows are skipped and
+each frame is cropped to its true content box:
+
+```bash
+uv run ai-sprite-studio autosplit --in poseboard.png --out row.png
+```
+
+In the web UI this is the **"Sprite sheet — auto-detect frames"** checkbox (recommended
+for any sheet). `regrid` (below) is the manual fallback when you want to force an exact
+grid.
+
 ### Reshape a grid pose board into a row (`regrid`)
 
 The snap is a **component-row** engine — it reads frames from a **single horizontal

@@ -14,7 +14,7 @@ import webbrowser
 import uvicorn
 
 from .app import create_app
-from .imaging import CHROMA, frames_to_row, grid_to_row, prep_to_chroma
+from .imaging import CHROMA, frames_from_sheet, frames_to_row, grid_to_row, prep_to_chroma
 
 # The canonical anchor is locked to a 1024x1024 chroma-green candidate (prompt 01).
 _CANVAS = "1024x1024"
@@ -68,6 +68,17 @@ def combine(*, sources: list[Path], out: Path) -> int:
     out = Path(out)
     out.write_bytes(frames_to_row([Path(source).read_bytes() for source in sources]))
     print(f"wrote {out}  (1x{len(sources)} row; upload with frames={len(sources)})")
+    return 0
+
+
+def autosplit(*, source: Path, out: Path) -> int:
+    frames = frames_from_sheet(Path(source).read_bytes())
+    if not frames:
+        print("no frames detected (is the background a flat colour?)", file=sys.stderr)
+        return 1
+    out = Path(out)
+    out.write_bytes(frames_to_row(frames))
+    print(f"wrote {out}  (auto-detected {len(frames)} frames; upload with frames={len(frames)})")
     return 0
 
 
@@ -310,6 +321,10 @@ def main(argv: list[str] | None = None) -> int:
     combine_parser.add_argument("sources", type=Path, nargs="+", metavar="IMAGE", help="frame images in order")
     combine_parser.add_argument("--out", type=Path, default=Path("row.png"))
 
+    auto_parser = commands.add_parser("autosplit", help="auto-detect frames on a sprite sheet by background gaps (no cols/rows needed)")
+    auto_parser.add_argument("--in", dest="source", type=Path, required=True)
+    auto_parser.add_argument("--out", type=Path, default=Path("row.png"))
+
     regrid_parser = commands.add_parser("regrid", help="reshape an NxM grid pose board into a 1xN row the snap can read")
     regrid_parser.add_argument("--in", dest="source", type=Path, required=True)
     regrid_parser.add_argument("--out", type=Path, default=Path("row.png"))
@@ -326,6 +341,8 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     if arguments.command == "combine":
         return combine(sources=arguments.sources, out=arguments.out)
+    if arguments.command == "autosplit":
+        return autosplit(source=arguments.source, out=arguments.out)
     if arguments.command == "regrid":
         return regrid(source=arguments.source, out=arguments.out, cols=arguments.cols, rows=arguments.rows, frames=arguments.frames)
     if arguments.command == "prep":
