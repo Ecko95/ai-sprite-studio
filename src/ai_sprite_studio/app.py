@@ -17,6 +17,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, Response
 from starlette.routing import Route
 
+from . import curator
 from .api import api_error, cancel_job, create_job, get_job, job_events, project_detail, projects
 from .jobs import JobHandler, JobRunner
 from .project_store import ProjectStore
@@ -24,6 +25,9 @@ from .project_store import ProjectStore
 
 _CSP = "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 _SESSION_COOKIE = "ai_sprite_studio_session"
+# Mutating curator routes serve the vendored (token-less) UI, so they rely on
+# loopback + same-origin instead of a CSRF token for cross-site defense.
+_ORIGIN_GUARDED = frozenset({"/api/curation", "/curator/upload"})
 
 
 def _is_loopback_host(value: str | None) -> bool:
@@ -120,6 +124,12 @@ class LocalSecurityMiddleware:
                     api_error("csrf_failed", "A valid CSRF token is required", status_code=403)
                 )(scope, receive, send)
                 return
+        elif scope["path"] in _ORIGIN_GUARDED and scope["method"] == "POST":
+            if not _same_loopback_origin(headers.get("origin"), host):
+                await _secure(
+                    api_error("invalid_origin", "Same-origin local access is required", status_code=403)
+                )(scope, receive, send)
+                return
 
         async def send_securely(message):
             if message["type"] == "http.response.start":
@@ -143,7 +153,20 @@ async def _root(request):
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         f"<meta name=\"csrf-token\" content=\"{escape(csrf_token)}\">"
         "<title>AI Sprite Studio</title></head><body><main><h1>AI Sprite Studio</h1>"
-        "<p>Local app ready.</p></main></body></html>"
+        "<p>Upload one static PNG/JPEG/WebP sprite strip, then curate it.</p>"
+        "<form id=\"upload\">"
+        "<p><input type=\"file\" name=\"file\" "
+        "accept=\"image/png,image/jpeg,image/webp\" required></p>"
+        "<p><label>Frames <input type=\"number\" name=\"frames\" value=\"4\" "
+        "min=\"1\" max=\"12\"></label></p>"
+        "<p><label>Segmentation <select name=\"segmentation\">"
+        "<option value=\"components\">components</option>"
+        "<option value=\"projection\">projection</option></select></label></p>"
+        "<p><button type=\"submit\">Upload &amp; extract</button></p></form>"
+        "<p id=\"status\" role=\"status\"></p>"
+        "<p><a href=\"/curator\">Open curator</a> (after uploading)</p>"
+        "<script src=\"/curator/upload.js\"></script>"
+        "</main></body></html>"
     )
     if request.cookies.get(_SESSION_COOKIE) != session_id:
         response.set_cookie(_SESSION_COOKIE, session_id, httponly=True, samesite="strict")
@@ -187,6 +210,17 @@ def create_app(workspace: str | Path, handler: JobHandler | None = None) -> Star
             Route("/api/v1/jobs/{job_id}", get_job),
             Route("/api/v1/jobs/{job_id}/events", job_events),
             Route("/api/v1/jobs/{job_id}/cancel", cancel_job, methods=["POST"]),
+            Route("/curator/upload.js", curator.upload_js),
+            Route("/curator/upload", curator.upload, methods=["POST"]),
+            Route("/curator", curator.curator_index),
+            Route("/curator.js", curator.curator_asset),
+            Route("/curator.css", curator.curator_asset),
+            Route("/curator/frame/{artifact_id}", curator.frame_bytes),
+            Route("/api/run", curator.api_run),
+            Route("/api/progress", curator.api_progress),
+            Route("/api/curation", curator.api_curation, methods=["POST"]),
+            Route("/run/{name}", curator.run_file),
+            Route("/download/{kind}", curator.download),
         ],
         middleware=[Middleware(LocalSecurityMiddleware)],
         lifespan=lifespan,
@@ -195,4 +229,5 @@ def create_app(workspace: str | Path, handler: JobHandler | None = None) -> Star
     app.state.store = ProjectStore(workspace)
     app.state.runner = JobRunner(app.state.store, handler)
     app.state.sessions = {}
+    app.state.curator = {"project_id": None}
     return app
