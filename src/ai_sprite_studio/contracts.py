@@ -62,7 +62,7 @@ CORE_STATE_PRESETS: dict[str, tuple[int, int, bool, GeneratorKind]] = {
 class StateSpec(ContractModel):
     id: str
     label: str
-    frames: int = Field(ge=1, le=12)
+    frames: int = Field(ge=1, le=128)
     fps: int = Field(ge=1, le=30)
     loop: bool
     generator: GeneratorKind

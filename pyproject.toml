@@ -47,7 +47,7 @@ sprite-gen = { git = "https://github.com/aldegad/sprite-gen.git", rev = "606db6d
 where = ["src"]
 
 [tool.setuptools.package-data]
-ai_sprite_studio = ["assets/upstream/**/*", "assets/*.js", "assets/*.css"]
+ai_sprite_studio = ["assets/upstream/**/*", "assets/*.js", "assets/*.css", "assets/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

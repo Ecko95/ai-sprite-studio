@@ -13,18 +13,28 @@ and AI frame edit is Task 6; direction groups/anchors are Task 7.
 
 from __future__ import annotations
 
+import base64
 from importlib.resources import files
 from io import BytesIO
 import json
-from uuid import UUID
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import urllib.error
+import urllib.request
+from uuid import UUID, uuid4
 import zipfile
 
-from PIL import Image
+from dotenv import load_dotenv
+import imageio_ffmpeg
+from openai import OpenAI, OpenAIError
+from PIL import Image, ImageChops
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from .contracts import ProjectConfig
-from .imaging import frames_from_sheet, frames_to_gif, frames_to_row, grid_to_row, scale_nearest
+from .imaging import CHROMA, frames_from_sheet, frames_to_gif, frames_to_row, grid_to_row, scale_nearest
 from .project_store import ProjectStoreError
 from .sprite_engine import SpriteEngine, SpriteEngineError
 
@@ -80,6 +90,8 @@ form.addEventListener('submit', async (event) => {
 """
 
 _MAX_UPLOAD = 20 * 1024 * 1024
+_MAX_VIDEO = 100 * 1024 * 1024
+_REFERENCE_SIZES = {"1024x1024", "1536x1024", "1024x1536"}
 
 
 def _engine(request) -> SpriteEngine:
@@ -113,6 +125,16 @@ async def curator_index(request) -> Response:
 async def suite_js(request) -> Response:
     data = files("ai_sprite_studio").joinpath("assets/curator-suite.js").read_bytes()
     return Response(data, media_type="text/javascript; charset=utf-8")
+
+
+def studio_asset(name: str, media_type: str):
+    """Handler factory serving one packaged asset file (same pattern as suite_js)."""
+
+    async def handler(request) -> Response:
+        data = files("ai_sprite_studio").joinpath(f"assets/{name}").read_bytes()
+        return Response(data, media_type=media_type)
+
+    return handler
 
 
 async def studio_css(request) -> Response:
@@ -195,6 +217,24 @@ async def upload(request) -> Response:
         media_type = (uploads[0].content_type or "").split(";")[0].strip()
         upload_name = payloads[0][0]
 
+    return await _finalize_row(
+        request, data, media_type=media_type, filename=upload_name,
+        project_name=project_name, frames=frames, segmentation=segmentation,
+    )
+
+
+async def _finalize_row(
+    request,
+    data: bytes,
+    *,
+    media_type: str,
+    filename: str,
+    project_name: str,
+    frames: int,
+    segmentation: str,
+    extra: dict | None = None,
+) -> Response:
+    """Shared tail of every ingest path: row bytes -> new active curated project."""
     engine = _engine(request)
     store = request.app.state.store
 
@@ -208,7 +248,7 @@ async def upload(request) -> Response:
 
     def run() -> UUID:
         project = store.create(ProjectConfig(name=project_name))
-        uploaded = engine.ingest_upload(project.id, data, media_type=media_type, filename=upload_name)
+        uploaded = engine.ingest_upload(project.id, data, media_type=media_type, filename=filename)
         engine.prepare(project.id, uploaded.id, frames=frames, chroma_key=chroma_key)
         engine.extract(project.id, segmentation=segmentation)
         return project.id
@@ -218,7 +258,219 @@ async def upload(request) -> Response:
     except (SpriteEngineError, ProjectStoreError) as exc:
         return _error(str(exc), status_code=400)
     request.app.state.curator["project_id"] = project_id
-    return JSONResponse({"project_id": str(project_id)}, status_code=201)
+    return JSONResponse({"project_id": str(project_id), **(extra or {})}, status_code=201)
+
+
+def _frame_to_chroma(data: bytes) -> bytes:
+    """Snap near-background pixels to exact chroma green (same as scripts/video_to_frames.py)."""
+    with Image.open(BytesIO(data)) as opened:
+        image = opened.convert("RGB")
+    background = image.getpixel((0, 0))
+    distance = ImageChops.difference(image, Image.new("RGB", image.size, background)).convert("L")
+    mask = distance.point(lambda value: 255 if value < 60 else 0)
+    image.paste(CHROMA, mask=mask)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def video_to_row(data: bytes, count: int) -> tuple[bytes, int]:
+    """Decode a video, evenly sample `count` frames, chroma-snap each, stitch one row."""
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    with tempfile.TemporaryDirectory(prefix="curator-video-") as staging:
+        video = Path(staging) / "input"
+        video.write_bytes(data)
+        # ponytail: decode every frame then sample — avoids needing ffprobe (which
+        # imageio-ffmpeg doesn't ship); switch to a select-filter pass if clips get long.
+        result = subprocess.run(
+            [ffmpeg, "-y", "-v", "error", "-i", str(video), "-vsync", "0", f"{staging}/f%05d.png"],
+            capture_output=True, text=True,
+        )
+        paths = sorted(Path(staging).glob("f*.png"))
+        if result.returncode != 0 or not paths:
+            detail = result.stderr.strip()
+            raise SpriteEngineError("could not decode video" + (f": {detail}" if detail else ""))
+        step = max(1, len(paths) // count)
+        sampled = paths[::step][:count]
+        frames = [_frame_to_chroma(path.read_bytes()) for path in sampled]
+    return frames_to_row(frames), len(frames)
+
+
+def _videos_dir(request) -> Path:
+    directory = Path(request.app.state.store.workspace) / "videos"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _video_index(directory: Path) -> dict[str, dict]:
+    index = directory / "index.json"
+    if index.is_file():
+        return json.loads(index.read_text())
+    return {}
+
+
+def _write_video_index(directory: Path, entries: dict[str, dict]) -> None:
+    (directory / "index.json").write_text(json.dumps(entries, indent=2) + "\n")
+
+
+def _store_video(directory: Path, data: bytes, *, name: str, content_type: str) -> str:
+    video_id = uuid4().hex
+    path = directory / video_id
+    path.write_bytes(data)
+    entries = _video_index(directory)
+    entries[video_id] = {
+        "name": name,
+        "size": len(data),
+        "content_type": content_type,
+        "created": path.stat().st_mtime,
+    }
+    _write_video_index(directory, entries)
+    return video_id
+
+
+async def video_upload(request) -> Response:
+    """Ingest a video (upload, URL, or saved library id) into evenly sampled frames.
+
+    ?frames=N (1-128, default 12) sampled evenly; ?save_only=1 stores the video in
+    the library without extracting. Every new video is persisted to the library.
+    """
+    try:
+        count = int(request.query_params.get("frames", "12"))
+        if not 1 <= count <= 128:
+            raise ValueError
+    except (TypeError, ValueError):
+        return _error("frames must be an integer between 1 and 128", status_code=400)
+    save_only = request.query_params.get("save_only") in {"1", "true", "on"}
+    segmentation = request.query_params.get("segmentation", "components")
+
+    data: bytes | None = None
+    name = ""
+    content_type = ""
+    request_type = (request.headers.get("content-type") or "").split(";")[0].strip()
+    if request_type == "application/json":
+        try:
+            payload = await request.json()
+        except (ValueError, json.JSONDecodeError):
+            return _error("invalid JSON body", status_code=400)
+        url, video_id = payload.get("url"), payload.get("video_id")
+        name = str(payload.get("name") or "")
+    else:
+        form = await request.form()
+        part = form.get("file")
+        if part is not None and not isinstance(part, str):
+            data = await part.read()
+            name = part.filename or ""
+            content_type = (part.content_type or "").split(";")[0].strip()
+        url = form.get("url") if isinstance(form.get("url"), str) else None
+        video_id = form.get("video_id") if isinstance(form.get("video_id"), str) else None
+        name = str(form.get("name") or name)
+
+    directory = _videos_dir(request)
+    if data is None and video_id:
+        entry = _video_index(directory).get(str(video_id))
+        if entry is None:
+            return _error("unknown video_id", status_code=404)
+        video_id = str(video_id)
+        data = (directory / video_id).read_bytes()
+        name, content_type = name or entry["name"], entry["content_type"]
+    elif data is None and url:
+        url = str(url)
+        if not url.startswith(("http://", "https://")):
+            return _error("url must be http(s)", status_code=400)
+
+        def fetch() -> tuple[bytes, str]:
+            with urllib.request.urlopen(url) as response:
+                return response.read(_MAX_VIDEO + 1), response.headers.get_content_type() or ""
+
+        try:
+            data, content_type = await run_in_threadpool(fetch)
+        except (urllib.error.URLError, OSError) as exc:
+            return _error(f"could not download video: {exc}", status_code=400)
+        name = name or url.rsplit("/", 1)[-1].split("?")[0] or "video"
+        video_id = None
+    else:
+        video_id = None
+    if not data:
+        return _error("provide a video file, url, or video_id", status_code=400)
+    if len(data) > _MAX_VIDEO:
+        return _error("video too large (max 100MB)", status_code=400)
+    if not content_type.startswith("video/"):
+        content_type = "video/webm" if name.endswith(".webm") else "video/mp4"
+    if video_id is None:
+        video_id = _store_video(directory, data, name=name or "video.mp4", content_type=content_type)
+    if save_only:
+        return JSONResponse({"video_id": video_id}, status_code=201)
+
+    try:
+        row, frames = await run_in_threadpool(video_to_row, data, count)
+    except SpriteEngineError as exc:
+        return _error(str(exc), status_code=400)
+    return await _finalize_row(
+        request, row, media_type="image/png", filename="video-row.png",
+        project_name=name or "Video", frames=frames, segmentation=segmentation,
+        extra={"video_id": video_id},
+    )
+
+
+async def videos_list(request) -> Response:
+    entries = _video_index(_videos_dir(request))
+    videos = [
+        {
+            "id": video_id,
+            "name": entry["name"],
+            "size": entry["size"],
+            "content_type": entry["content_type"],
+            "url": f"/curator/video/{video_id}",
+        }
+        for video_id, entry in sorted(entries.items(), key=lambda item: item[1].get("created", 0))
+    ]
+    return JSONResponse({"videos": videos})
+
+
+async def video_file(request) -> Response:
+    video_id = request.path_params["video_id"]
+    directory = _videos_dir(request)
+    entries = _video_index(directory)
+    # Only ids present in the index are touched, so a crafted path can't escape.
+    if video_id not in entries or not (directory / video_id).is_file():
+        return _error("not found", status_code=404)
+    if request.method == "DELETE":
+        (directory / video_id).unlink(missing_ok=True)
+        entries.pop(video_id, None)
+        _write_video_index(directory, entries)
+        return JSONResponse({})
+    data = await run_in_threadpool((directory / video_id).read_bytes)
+    entry = entries[video_id]
+    return Response(data, media_type=entry["content_type"], headers={"X-Filename": entry["name"]})
+
+
+async def reference(request) -> Response:
+    """Generate a character reference PNG via the OpenAI Images API."""
+    try:
+        payload = await request.json()
+    except (ValueError, json.JSONDecodeError):
+        return _error("invalid JSON body", status_code=400)
+    prompt = payload.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return _error("prompt is required", status_code=400)
+    if len(prompt) > 4000:
+        return _error("prompt too long (max 4000 characters)", status_code=400)
+    size = payload.get("size", "1024x1024")
+    if size not in _REFERENCE_SIZES:
+        return _error("size must be one of " + ", ".join(sorted(_REFERENCE_SIZES)), status_code=400)
+    load_dotenv()  # `serve` doesn't load .env (the CLI generation commands do it per-command)
+    if not os.environ.get("OPENAI_API_KEY"):
+        return _error("OPENAI_API_KEY is not set", status_code=400)
+
+    def run() -> bytes:
+        result = OpenAI().images.generate(model="gpt-image-1", prompt=prompt, size=size, n=1)
+        return base64.b64decode(result.data[0].b64_json)
+
+    try:
+        data = await run_in_threadpool(run)
+    except OpenAIError as exc:
+        return _error(str(exc), status_code=502)
+    return Response(data, media_type="image/png", headers={"X-Filename": "reference.png"})
 
 
 def _run_json(view) -> dict:
