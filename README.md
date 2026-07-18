@@ -114,6 +114,19 @@ override the defaults. This spends OpenAI credits — it is the only path here t
 calls a provider. Feed the result into `SpriteEngine.prepare(...)` → `extract(...)`
 to snap it to the grid.
 
+**Keyless / manual (`--dry-run`)** — to use your ChatGPT (or Codex TUI) subscription
+instead of an API key, `--dry-run` prints the ready-to-paste prompt and writes the
+`.prompt.md` provenance sidecar **without** calling any provider (no key, no store
+writes). Paste it into ChatGPT / the interactive Codex image tool, save the PNG, then
+bring it back with `prep` → upload. (There is no keyless *headless* path: the Codex
+built-in image tool is interactive-TUI-only, and its CLI fallback needs
+`OPENAI_API_KEY`.)
+
+```bash
+uv run ai-sprite-studio genbase --dry-run --concept "young pirate boy..." --out base.png
+uv run ai-sprite-studio genactions --dry-run --project <id> --state attack --out attack.png
+```
+
 ### Generate an action pose board (gpt-image)
 
 `genactions` turns a short action intent into the full-spec `action_poseboards`
@@ -131,6 +144,32 @@ States come from the project (`idle`/`attack`/`hurt`/`jump`/`death`); frame coun
 the locked presets. `--direction` is `down` only until directional anchors exist. The
 board is an **intermediate** — recover + snap its frames via the frame-recovery stage;
 never grid-crop it (poses cross cell borders by design). Spends OpenAI credits.
+
+### Assemble frames image-by-image (`combine`)
+
+If you have each frame as a **separate image** (or several rows/sheets to join),
+`combine` stitches them into one 1×N row in the order given (each normalised to the
+largest common cell on chroma green):
+
+```bash
+uv run ai-sprite-studio combine --out row.png frame1.png frame2.png frame3.png
+```
+
+Then upload `row.png` with **frames = N**.
+
+### Reshape a grid pose board into a row (`regrid`)
+
+The snap is a **component-row** engine — it reads frames from a **single horizontal
+row (1×N)**. A generated pose board is usually a 2D grid (e.g. 4×3), which the snap
+mis-slices into full-height columns (two stacked poses per "frame"). `regrid` cuts the
+first `--frames` cells in reading order and lines them up in one row:
+
+```bash
+uv run ai-sprite-studio regrid --in poseboard.png --out row.png --cols 4 --rows 3 --frames 8
+```
+
+Then upload `row.png` with **frames = N**. (The proper upstream path is the
+frame-recovery stage; `regrid` is the local bridge until that's built.)
 
 ### Prep an existing image for snapping
 

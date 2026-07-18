@@ -88,6 +88,73 @@ def _prep_to_chroma(data: bytes, *, tolerance: int, pad: float) -> bytes:
     return buffer.getvalue()
 
 
+def _grid_to_row(data: bytes, *, cols: int, rows: int, frames: int) -> bytes:
+    """Re-lay an NxM grid pose board into a single horizontal 1xN row.
+
+    The snap is a component-row engine (one horizontal row of frames); a 2D grid
+    gets sliced into full-height columns (two stacked poses per 'frame'). This cuts
+    the first `frames` cells in reading order and lines them up in one row.
+    """
+    from PIL import Image
+
+    with Image.open(BytesIO(data)) as opened:
+        img = opened.convert("RGB")
+    width, height = img.size
+    cell_w, cell_h = width // cols, height // rows
+    strip = Image.new("RGB", (cell_w * frames, cell_h), _CHROMA)
+    for index in range(frames):
+        row, col = divmod(index, cols)
+        cell = img.crop((col * cell_w, row * cell_h, col * cell_w + cell_w, row * cell_h + cell_h))
+        strip.paste(cell, (index * cell_w, 0))
+    buffer = BytesIO()
+    strip.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _frames_to_row(frames: list[bytes]) -> bytes:
+    """Lay independent frame images side by side into one 1xN row.
+
+    Frames are normalised to the largest common cell (centred on chroma green), so
+    per-frame sizes can differ; the snap re-centers each frame anyway.
+    """
+    from PIL import Image
+
+    images = []
+    for data in frames:
+        with Image.open(BytesIO(data)) as opened:
+            images.append(opened.convert("RGB"))
+    cell_w = max(image.width for image in images)
+    cell_h = max(image.height for image in images)
+    strip = Image.new("RGB", (cell_w * len(images), cell_h), _CHROMA)
+    for index, image in enumerate(images):
+        offset_x = index * cell_w + (cell_w - image.width) // 2
+        offset_y = (cell_h - image.height) // 2
+        strip.paste(image, (offset_x, offset_y))
+    buffer = BytesIO()
+    strip.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def combine(*, sources: list[Path], out: Path) -> int:
+    if not sources:
+        print("combine needs at least one image", file=sys.stderr)
+        return 1
+    out = Path(out)
+    out.write_bytes(_frames_to_row([Path(source).read_bytes() for source in sources]))
+    print(f"wrote {out}  (1x{len(sources)} row; upload with frames={len(sources)})")
+    return 0
+
+
+def regrid(*, source: Path, out: Path, cols: int, rows: int, frames: int) -> int:
+    if not 1 <= frames <= cols * rows:
+        print(f"--frames must be 1..{cols * rows} for a {cols}x{rows} grid", file=sys.stderr)
+        return 1
+    out = Path(out)
+    out.write_bytes(_grid_to_row(Path(source).read_bytes(), cols=cols, rows=rows, frames=frames))
+    print(f"wrote {out}  (1x{frames} row; upload with frames={frames})")
+    return 0
+
+
 def prep(*, source: Path, out: Path, tolerance: int, pad: float) -> int:
     out = Path(out)
     out.write_bytes(_prep_to_chroma(Path(source).read_bytes(), tolerance=tolerance, pad=pad))
@@ -146,6 +213,7 @@ def genactions(
     out: Path,
     model: str,
     quality: str,
+    dry_run: bool = False,
     _generate=_openai_edit_bytes,
 ) -> int:
     from .project_store import ProjectStore
@@ -161,14 +229,16 @@ def genactions(
     state = states[state_id]
 
     # Anchor bytes: an explicit snapped PNG, else the project's latest ingested input.
+    # dry-run only needs the prompt, so the anchor is optional there.
     inputs = [a for a in project.artifacts if a.kind == "input" and not a.stale]
     anchor_ref = None
+    anchor_bytes = None
     if anchor is not None:
         anchor_bytes = Path(anchor).read_bytes()
     elif inputs:
         anchor_ref = inputs[-1]
         anchor_bytes = store.read_artifact_bytes(project.id, anchor_ref.id)
-    else:
+    elif not dry_run:
         print("no anchor: pass --anchor or ingest a base image first", file=sys.stderr)
         return 1
 
@@ -201,6 +271,13 @@ def genactions(
         return 1
     image_prompt = match.group(1).strip()
 
+    if dry_run:
+        sidecar = Path(out).with_suffix(Path(out).suffix + ".prompt.md")
+        sidecar.write_text(rendered.text, encoding="utf-8")
+        print(image_prompt)
+        print(f"\n# attach your snapped anchor + the pose-board guide when pasting into ChatGPT. Provenance: {sidecar}", file=sys.stderr)
+        return 0
+
     guide = guide_for_stage("action_poseboards")
     data = _generate(image_prompt, [anchor_bytes, guide.data], model=model, size=_POSEBOARD_SIZE, quality=quality)
 
@@ -223,6 +300,7 @@ def genbase(
     model: str,
     quality: str,
     project_id: str | None,
+    dry_run: bool = False,
     _generate=_openai_image_bytes,
 ) -> int:
     from .contracts import ProjectConfig
@@ -230,8 +308,12 @@ def genbase(
     from .prompts import render_prompt
     from .sprite_engine import SpriteEngine
 
-    store = ProjectStore(workspace)
-    project = store.load(project_id) if project_id else store.create(ProjectConfig(name=name))
+    # dry-run renders against an ephemeral project so it never touches the store.
+    if dry_run:
+        project = ProjectConfig(name=name)
+    else:
+        store = ProjectStore(workspace)
+        project = store.load(project_id) if project_id else store.create(ProjectConfig(name=name))
 
     rendered = render_prompt(
         "base_generation",
@@ -243,6 +325,13 @@ def genbase(
         print("base_generation template is missing its prompt block", file=sys.stderr)
         return 1
     image_prompt = match.group(1).strip()
+
+    if dry_run:
+        sidecar = Path(out).with_suffix(Path(out).suffix + ".prompt.md")
+        sidecar.write_text(rendered.text, encoding="utf-8")
+        print(image_prompt)
+        print(f"\n# paste the above into ChatGPT / Codex, save the PNG, then: prep -> upload. Provenance: {sidecar}", file=sys.stderr)
+        return 0
 
     data = _generate(image_prompt, model=model, quality=quality)
 
@@ -276,6 +365,7 @@ def main(argv: list[str] | None = None) -> int:
     gen_parser.add_argument("--out", type=Path, default=Path("base.png"))
     gen_parser.add_argument("--model", default="gpt-image-1")
     gen_parser.add_argument("--quality", default="high", choices=["low", "medium", "high", "auto"])
+    gen_parser.add_argument("--dry-run", dest="dry_run", action="store_true", help="print the ready-to-paste prompt (no provider call, no key); for manual ChatGPT/Codex generation")
 
     act_parser = commands.add_parser("genactions", help="build the full-spec action-sheet prompt and generate a pose board with gpt-image")
     act_parser.add_argument("--workspace", type=Path, default=default_workspace())
@@ -288,6 +378,18 @@ def main(argv: list[str] | None = None) -> int:
     act_parser.add_argument("--out", type=Path, default=Path("poseboard.png"))
     act_parser.add_argument("--model", default="gpt-image-1")
     act_parser.add_argument("--quality", default="high", choices=["low", "medium", "high", "auto"])
+    act_parser.add_argument("--dry-run", dest="dry_run", action="store_true", help="print the ready-to-paste prompt (no provider call, no key); for manual ChatGPT/Codex generation")
+
+    combine_parser = commands.add_parser("combine", help="stitch individual frame images (or rows) into one 1xN row the snap can read")
+    combine_parser.add_argument("sources", type=Path, nargs="+", metavar="IMAGE", help="frame images in order")
+    combine_parser.add_argument("--out", type=Path, default=Path("row.png"))
+
+    regrid_parser = commands.add_parser("regrid", help="reshape an NxM grid pose board into a 1xN row the snap can read")
+    regrid_parser.add_argument("--in", dest="source", type=Path, required=True)
+    regrid_parser.add_argument("--out", type=Path, default=Path("row.png"))
+    regrid_parser.add_argument("--cols", type=int, required=True, help="columns in the source grid")
+    regrid_parser.add_argument("--rows", type=int, required=True, help="rows in the source grid")
+    regrid_parser.add_argument("--frames", type=int, required=True, help="number of filled cells (reading order)")
 
     prep_parser = commands.add_parser("prep", help="strip a flat background to chroma green so an existing image snaps cleanly")
     prep_parser.add_argument("--in", dest="source", type=Path, required=True)
@@ -296,6 +398,10 @@ def main(argv: list[str] | None = None) -> int:
     prep_parser.add_argument("--pad", type=float, default=0.1, help="green margin as a fraction of the longest side; 0 keeps size")
 
     arguments = parser.parse_args(argv)
+    if arguments.command == "combine":
+        return combine(sources=arguments.sources, out=arguments.out)
+    if arguments.command == "regrid":
+        return regrid(source=arguments.source, out=arguments.out, cols=arguments.cols, rows=arguments.rows, frames=arguments.frames)
     if arguments.command == "prep":
         return prep(source=arguments.source, out=arguments.out, tolerance=arguments.tolerance, pad=arguments.pad)
     if arguments.command == "genactions":
@@ -310,6 +416,7 @@ def main(argv: list[str] | None = None) -> int:
             out=arguments.out,
             model=arguments.model,
             quality=arguments.quality,
+            dry_run=arguments.dry_run,
         )
     if arguments.command == "genbase":
         return genbase(
@@ -322,6 +429,7 @@ def main(argv: list[str] | None = None) -> int:
             model=arguments.model,
             quality=arguments.quality,
             project_id=arguments.project_id,
+            dry_run=arguments.dry_run,
         )
     serve(arguments.workspace, arguments.port)
     return 0

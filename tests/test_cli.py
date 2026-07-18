@@ -129,6 +129,83 @@ def test_genactions_builds_the_action_prompt_and_feeds_anchor_plus_guide(tmp_pat
     assert out.with_suffix(".png.prompt.md").exists()
 
 
+def test_genbase_dry_run_emits_prompt_without_provider_or_store(tmp_path, capsys):
+    def boom(*args, **kwargs):  # must never be called in dry-run
+        raise AssertionError("provider was called during --dry-run")
+
+    out = tmp_path / "base.png"
+    code = cli.genbase(
+        workspace=tmp_path / "ws",  # must NOT be created
+        concept="young pirate boy in a black tricorn hat",
+        costume=cli._DEFAULT_COSTUME,
+        silhouette=cli._DEFAULT_SILHOUETTE,
+        name="Pirate",
+        out=out,
+        model="gpt-image-1",
+        quality="high",
+        project_id=None,
+        dry_run=True,
+        _generate=boom,
+    )
+
+    assert code == 0
+    printed = capsys.readouterr().out
+    assert "young pirate boy in a black tricorn hat" in printed and "#00FF00" in printed
+    assert not out.exists()  # no image written
+    assert not (tmp_path / "ws").exists()  # no project/store side effects
+    assert out.with_suffix(".png.prompt.md").read_text()  # provenance sidecar written
+
+
+def test_combine_stitches_independent_frames_into_a_row(tmp_path):
+    # Three differently-sized frames; each must land in its own equal cell, in order.
+    sizes = [(20, 30), (16, 24), (12, 30)]
+    paths = []
+    for index, (w, h) in enumerate(sizes):
+        img = Image.new("RGB", (w, h), (index * 20 + 20, 0, 0))
+        path = tmp_path / f"f{index}.png"
+        img.save(path)
+        paths.append(path)
+
+    out = tmp_path / "row.png"
+    assert cli.combine(sources=paths, out=out) == 0
+
+    result = Image.open(out).convert("RGB")
+    cell_w, cell_h = max(w for w, _ in sizes), max(h for _, h in sizes)  # 20 x 30
+    assert result.size == (cell_w * 3, cell_h)
+    # Each cell centre holds its frame colour, left-to-right in the given order.
+    for index in range(3):
+        assert result.getpixel((index * cell_w + cell_w // 2, cell_h // 2)) == (index * 20 + 20, 0, 0)
+
+
+def test_regrid_reshapes_grid_into_a_single_row_in_reading_order(tmp_path):
+    # 4x3 grid, each cell filled with a unique colour keyed to its reading index.
+    cols, rows, cell = 4, 3, 10
+    grid = Image.new("RGB", (cols * cell, rows * cell))
+    for index in range(cols * rows):
+        r, c = divmod(index, cols)
+        for x in range(c * cell, c * cell + cell):
+            for y in range(r * cell, r * cell + cell):
+                grid.putpixel((x, y), (index * 10, 0, 0))
+    src = tmp_path / "grid.png"
+    grid.save(src)
+
+    out = tmp_path / "row.png"
+    assert cli.regrid(source=src, out=out, cols=cols, rows=rows, frames=8) == 0
+
+    result = Image.open(out).convert("RGB")
+    assert result.size == (cell * 8, cell)  # 1x8 row
+    # Each strip cell holds the matching source cell, left-to-right = reading order 0..7.
+    for index in range(8):
+        assert result.getpixel((index * cell + cell // 2, cell // 2)) == (index * 10, 0, 0)
+
+
+def test_regrid_rejects_frame_count_beyond_the_grid(tmp_path):
+    grid = Image.new("RGB", (40, 30))
+    src = tmp_path / "g.png"
+    grid.save(src)
+    assert cli.regrid(source=src, out=tmp_path / "r.png", cols=4, rows=3, frames=13) == 1
+
+
 def test_prep_floods_border_background_to_chroma_and_keeps_interior(tmp_path):
     # White canvas, black frame, white interior hole — the hole must survive.
     img = Image.new("RGB", (40, 40), "white")
