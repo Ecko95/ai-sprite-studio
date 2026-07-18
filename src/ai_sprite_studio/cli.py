@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-from io import BytesIO
 import os
 from pathlib import Path
 import re
@@ -15,6 +14,7 @@ import webbrowser
 import uvicorn
 
 from .app import create_app
+from .imaging import CHROMA, frames_to_row, grid_to_row, prep_to_chroma
 
 # The canonical anchor is locked to a 1024x1024 chroma-green candidate (prompt 01).
 _CANVAS = "1024x1024"
@@ -61,86 +61,12 @@ def serve(workspace: str | Path, port: int) -> None:
         listener.close()
 
 
-_CHROMA = (0, 255, 0)  # #00FF00 — the snap keys alpha off this exact background
-
-
-def _prep_to_chroma(data: bytes, *, tolerance: int, pad: float) -> bytes:
-    """Flood the border background to chroma green so the snap can key + center it.
-
-    Only the background connected to the canvas edges is replaced, so interior
-    same-colour pixels (a white shirt, the inside of a shape) survive.
-    """
-    from PIL import Image, ImageDraw
-
-    with Image.open(BytesIO(data)) as opened:
-        img = opened.convert("RGB")
-    width, height = img.size
-    for corner in ((0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)):
-        ImageDraw.floodfill(img, corner, _CHROMA, thresh=tolerance)
-    if pad > 0:
-        margin = round(max(width, height) * pad)
-        side = max(width, height) + 2 * margin
-        canvas = Image.new("RGB", (side, side), _CHROMA)
-        canvas.paste(img, ((side - width) // 2, (side - height) // 2))
-        img = canvas
-    buffer = BytesIO()
-    img.save(buffer, format="PNG")
-    return buffer.getvalue()
-
-
-def _grid_to_row(data: bytes, *, cols: int, rows: int, frames: int) -> bytes:
-    """Re-lay an NxM grid pose board into a single horizontal 1xN row.
-
-    The snap is a component-row engine (one horizontal row of frames); a 2D grid
-    gets sliced into full-height columns (two stacked poses per 'frame'). This cuts
-    the first `frames` cells in reading order and lines them up in one row.
-    """
-    from PIL import Image
-
-    with Image.open(BytesIO(data)) as opened:
-        img = opened.convert("RGB")
-    width, height = img.size
-    cell_w, cell_h = width // cols, height // rows
-    strip = Image.new("RGB", (cell_w * frames, cell_h), _CHROMA)
-    for index in range(frames):
-        row, col = divmod(index, cols)
-        cell = img.crop((col * cell_w, row * cell_h, col * cell_w + cell_w, row * cell_h + cell_h))
-        strip.paste(cell, (index * cell_w, 0))
-    buffer = BytesIO()
-    strip.save(buffer, format="PNG")
-    return buffer.getvalue()
-
-
-def _frames_to_row(frames: list[bytes]) -> bytes:
-    """Lay independent frame images side by side into one 1xN row.
-
-    Frames are normalised to the largest common cell (centred on chroma green), so
-    per-frame sizes can differ; the snap re-centers each frame anyway.
-    """
-    from PIL import Image
-
-    images = []
-    for data in frames:
-        with Image.open(BytesIO(data)) as opened:
-            images.append(opened.convert("RGB"))
-    cell_w = max(image.width for image in images)
-    cell_h = max(image.height for image in images)
-    strip = Image.new("RGB", (cell_w * len(images), cell_h), _CHROMA)
-    for index, image in enumerate(images):
-        offset_x = index * cell_w + (cell_w - image.width) // 2
-        offset_y = (cell_h - image.height) // 2
-        strip.paste(image, (offset_x, offset_y))
-    buffer = BytesIO()
-    strip.save(buffer, format="PNG")
-    return buffer.getvalue()
-
-
 def combine(*, sources: list[Path], out: Path) -> int:
     if not sources:
         print("combine needs at least one image", file=sys.stderr)
         return 1
     out = Path(out)
-    out.write_bytes(_frames_to_row([Path(source).read_bytes() for source in sources]))
+    out.write_bytes(frames_to_row([Path(source).read_bytes() for source in sources]))
     print(f"wrote {out}  (1x{len(sources)} row; upload with frames={len(sources)})")
     return 0
 
@@ -150,15 +76,15 @@ def regrid(*, source: Path, out: Path, cols: int, rows: int, frames: int) -> int
         print(f"--frames must be 1..{cols * rows} for a {cols}x{rows} grid", file=sys.stderr)
         return 1
     out = Path(out)
-    out.write_bytes(_grid_to_row(Path(source).read_bytes(), cols=cols, rows=rows, frames=frames))
+    out.write_bytes(grid_to_row(Path(source).read_bytes(), cols=cols, rows=rows, frames=frames))
     print(f"wrote {out}  (1x{frames} row; upload with frames={frames})")
     return 0
 
 
 def prep(*, source: Path, out: Path, tolerance: int, pad: float) -> int:
     out = Path(out)
-    out.write_bytes(_prep_to_chroma(Path(source).read_bytes(), tolerance=tolerance, pad=pad))
-    print(f"wrote {out}  (upload this; the snap keys + centers off {'#%02X%02X%02X' % _CHROMA})")
+    out.write_bytes(prep_to_chroma(Path(source).read_bytes(), tolerance=tolerance, pad=pad))
+    print(f"wrote {out}  (upload this; the snap keys + centers off {'#%02X%02X%02X' % CHROMA})")
     return 0
 
 

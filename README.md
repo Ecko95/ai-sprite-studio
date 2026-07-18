@@ -92,6 +92,13 @@ uv run ai-sprite-studio serve --workspace /path/to/workspace
 `serve` binds to `127.0.0.1`, prints the actual URL (e.g. `http://127.0.0.1:8765/`)
 to stdout, and attempts to open a browser. Stop with `Ctrl-C`.
 
+The upload form takes **one image, a grid sheet, or several per-frame images** in one
+step (the same reshaping as the `combine`/`regrid` CLI commands, done server-side):
+
+- **Multiple files** → stitched into one row, one image per frame (frame count = files).
+- **One file + grid cols/rows** → the sheet is reshaped into a row (e.g. `4×3`).
+- **One file, grid left at 0** → used as-is (a single frame or an existing row + frames/segmentation).
+
 ### Generate a base character (gpt-image)
 
 `genbase` renders the pinned `base_generation` prompt (from
