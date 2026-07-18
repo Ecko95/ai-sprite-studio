@@ -146,6 +146,7 @@ def genactions(
     out: Path,
     model: str,
     quality: str,
+    dry_run: bool = False,
     _generate=_openai_edit_bytes,
 ) -> int:
     from .project_store import ProjectStore
@@ -161,14 +162,16 @@ def genactions(
     state = states[state_id]
 
     # Anchor bytes: an explicit snapped PNG, else the project's latest ingested input.
+    # dry-run only needs the prompt, so the anchor is optional there.
     inputs = [a for a in project.artifacts if a.kind == "input" and not a.stale]
     anchor_ref = None
+    anchor_bytes = None
     if anchor is not None:
         anchor_bytes = Path(anchor).read_bytes()
     elif inputs:
         anchor_ref = inputs[-1]
         anchor_bytes = store.read_artifact_bytes(project.id, anchor_ref.id)
-    else:
+    elif not dry_run:
         print("no anchor: pass --anchor or ingest a base image first", file=sys.stderr)
         return 1
 
@@ -201,6 +204,13 @@ def genactions(
         return 1
     image_prompt = match.group(1).strip()
 
+    if dry_run:
+        sidecar = Path(out).with_suffix(Path(out).suffix + ".prompt.md")
+        sidecar.write_text(rendered.text, encoding="utf-8")
+        print(image_prompt)
+        print(f"\n# attach your snapped anchor + the pose-board guide when pasting into ChatGPT. Provenance: {sidecar}", file=sys.stderr)
+        return 0
+
     guide = guide_for_stage("action_poseboards")
     data = _generate(image_prompt, [anchor_bytes, guide.data], model=model, size=_POSEBOARD_SIZE, quality=quality)
 
@@ -223,6 +233,7 @@ def genbase(
     model: str,
     quality: str,
     project_id: str | None,
+    dry_run: bool = False,
     _generate=_openai_image_bytes,
 ) -> int:
     from .contracts import ProjectConfig
@@ -230,8 +241,12 @@ def genbase(
     from .prompts import render_prompt
     from .sprite_engine import SpriteEngine
 
-    store = ProjectStore(workspace)
-    project = store.load(project_id) if project_id else store.create(ProjectConfig(name=name))
+    # dry-run renders against an ephemeral project so it never touches the store.
+    if dry_run:
+        project = ProjectConfig(name=name)
+    else:
+        store = ProjectStore(workspace)
+        project = store.load(project_id) if project_id else store.create(ProjectConfig(name=name))
 
     rendered = render_prompt(
         "base_generation",
@@ -243,6 +258,13 @@ def genbase(
         print("base_generation template is missing its prompt block", file=sys.stderr)
         return 1
     image_prompt = match.group(1).strip()
+
+    if dry_run:
+        sidecar = Path(out).with_suffix(Path(out).suffix + ".prompt.md")
+        sidecar.write_text(rendered.text, encoding="utf-8")
+        print(image_prompt)
+        print(f"\n# paste the above into ChatGPT / Codex, save the PNG, then: prep -> upload. Provenance: {sidecar}", file=sys.stderr)
+        return 0
 
     data = _generate(image_prompt, model=model, quality=quality)
 
@@ -276,6 +298,7 @@ def main(argv: list[str] | None = None) -> int:
     gen_parser.add_argument("--out", type=Path, default=Path("base.png"))
     gen_parser.add_argument("--model", default="gpt-image-1")
     gen_parser.add_argument("--quality", default="high", choices=["low", "medium", "high", "auto"])
+    gen_parser.add_argument("--dry-run", dest="dry_run", action="store_true", help="print the ready-to-paste prompt (no provider call, no key); for manual ChatGPT/Codex generation")
 
     act_parser = commands.add_parser("genactions", help="build the full-spec action-sheet prompt and generate a pose board with gpt-image")
     act_parser.add_argument("--workspace", type=Path, default=default_workspace())
@@ -288,6 +311,7 @@ def main(argv: list[str] | None = None) -> int:
     act_parser.add_argument("--out", type=Path, default=Path("poseboard.png"))
     act_parser.add_argument("--model", default="gpt-image-1")
     act_parser.add_argument("--quality", default="high", choices=["low", "medium", "high", "auto"])
+    act_parser.add_argument("--dry-run", dest="dry_run", action="store_true", help="print the ready-to-paste prompt (no provider call, no key); for manual ChatGPT/Codex generation")
 
     prep_parser = commands.add_parser("prep", help="strip a flat background to chroma green so an existing image snaps cleanly")
     prep_parser.add_argument("--in", dest="source", type=Path, required=True)
@@ -310,6 +334,7 @@ def main(argv: list[str] | None = None) -> int:
             out=arguments.out,
             model=arguments.model,
             quality=arguments.quality,
+            dry_run=arguments.dry_run,
         )
     if arguments.command == "genbase":
         return genbase(
@@ -322,6 +347,7 @@ def main(argv: list[str] | None = None) -> int:
             model=arguments.model,
             quality=arguments.quality,
             project_id=arguments.project_id,
+            dry_run=arguments.dry_run,
         )
     serve(arguments.workspace, arguments.port)
     return 0

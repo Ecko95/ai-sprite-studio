@@ -114,6 +114,19 @@ override the defaults. This spends OpenAI credits — it is the only path here t
 calls a provider. Feed the result into `SpriteEngine.prepare(...)` → `extract(...)`
 to snap it to the grid.
 
+**Keyless / manual (`--dry-run`)** — to use your ChatGPT (or Codex TUI) subscription
+instead of an API key, `--dry-run` prints the ready-to-paste prompt and writes the
+`.prompt.md` provenance sidecar **without** calling any provider (no key, no store
+writes). Paste it into ChatGPT / the interactive Codex image tool, save the PNG, then
+bring it back with `prep` → upload. (There is no keyless *headless* path: the Codex
+built-in image tool is interactive-TUI-only, and its CLI fallback needs
+`OPENAI_API_KEY`.)
+
+```bash
+uv run ai-sprite-studio genbase --dry-run --concept "young pirate boy..." --out base.png
+uv run ai-sprite-studio genactions --dry-run --project <id> --state attack --out attack.png
+```
+
 ### Generate an action pose board (gpt-image)
 
 `genactions` turns a short action intent into the full-spec `action_poseboards`

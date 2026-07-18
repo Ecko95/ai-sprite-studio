@@ -129,6 +129,33 @@ def test_genactions_builds_the_action_prompt_and_feeds_anchor_plus_guide(tmp_pat
     assert out.with_suffix(".png.prompt.md").exists()
 
 
+def test_genbase_dry_run_emits_prompt_without_provider_or_store(tmp_path, capsys):
+    def boom(*args, **kwargs):  # must never be called in dry-run
+        raise AssertionError("provider was called during --dry-run")
+
+    out = tmp_path / "base.png"
+    code = cli.genbase(
+        workspace=tmp_path / "ws",  # must NOT be created
+        concept="young pirate boy in a black tricorn hat",
+        costume=cli._DEFAULT_COSTUME,
+        silhouette=cli._DEFAULT_SILHOUETTE,
+        name="Pirate",
+        out=out,
+        model="gpt-image-1",
+        quality="high",
+        project_id=None,
+        dry_run=True,
+        _generate=boom,
+    )
+
+    assert code == 0
+    printed = capsys.readouterr().out
+    assert "young pirate boy in a black tricorn hat" in printed and "#00FF00" in printed
+    assert not out.exists()  # no image written
+    assert not (tmp_path / "ws").exists()  # no project/store side effects
+    assert out.with_suffix(".png.prompt.md").read_text()  # provenance sidecar written
+
+
 def test_prep_floods_border_background_to_chroma_and_keeps_interior(tmp_path):
     # White canvas, black frame, white interior hole — the hole must survive.
     img = Image.new("RGB", (40, 40), "white")
