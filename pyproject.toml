@@ -14,6 +14,7 @@ dependencies = [
     "openai",
     "pillow>=12,<13",
     "pydantic",
+    "python-dotenv>=1.2.2",
     "sprite-gen",
     "starlette",
     "uvicorn",

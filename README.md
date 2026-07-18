@@ -100,8 +100,11 @@ locked `1024×1024` / `high` settings, writes the chroma-green PNG (plus a
 `.prompt.md` provenance sidecar), and ingests it as an immutable `input` artifact so
 the canonical snap (`extract`) can run next.
 
+Set `OPENAI_API_KEY` in the environment or a local `.env` (git-ignored, loaded
+automatically):
+
 ```bash
-export OPENAI_API_KEY=sk-...
+echo 'OPENAI_API_KEY=sk-...' > .env    # or: export OPENAI_API_KEY=sk-...
 uv run ai-sprite-studio genbase --concept "young pirate boy in a black tricorn hat" --out base.png
 uv run ai-sprite-studio genbase --concept "..." --project <existing-project-id> --workspace /path/to/ws
 ```

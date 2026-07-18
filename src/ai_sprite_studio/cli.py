@@ -61,8 +61,10 @@ def serve(workspace: str | Path, port: int) -> None:
 
 
 def _openai_image_bytes(prompt: str, *, model: str, quality: str) -> bytes:
+    from dotenv import load_dotenv
     from openai import OpenAI
 
+    load_dotenv()  # picks up OPENAI_API_KEY from a local .env if present
     client = OpenAI()  # reads OPENAI_API_KEY from the environment
     result = client.images.generate(model=model, prompt=prompt, size=_CANVAS, quality=quality, n=1)
     return base64.b64decode(result.data[0].b64_json)
