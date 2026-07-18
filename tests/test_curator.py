@@ -225,3 +225,23 @@ def test_gif_export_honours_fps_and_loop_overrides(tmp_path):
         bad = client.get("/download/gif?fps=999")
     assert gif.status_code == 200
     assert bad.status_code == 400
+
+
+def test_upload_density_boost_validates_and_prescales(tmp_path):
+    from io import BytesIO as _BytesIO
+
+    from PIL import Image as _Image
+
+    from ai_sprite_studio.imaging import boost_density
+
+    doubled = boost_density(_strip_png(frames=2), 1.5)
+    with _Image.open(_BytesIO(doubled)) as image:
+        base = _Image.open(_BytesIO(_strip_png(frames=2)))
+        assert image.width == round(base.width * 1.5)
+    with _client(tmp_path) as client:
+        bad = client.post(
+            "/curator/upload?frames=2&density=9",
+            files={"files": ("ranger.png", _strip_png(frames=2), "image/png")},
+            headers={"Origin": "http://127.0.0.1"},
+        )
+    assert bad.status_code == 400
