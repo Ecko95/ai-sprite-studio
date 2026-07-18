@@ -216,3 +216,12 @@ def test_download_pngs_and_gif_exports(tmp_path):
         # identical consecutive frames may be merged by the GIF encoder
         assert animation.n_frames >= 1 and animation.size == (512, 512)
     assert bad.status_code == 404
+
+
+def test_gif_export_honours_fps_and_loop_overrides(tmp_path):
+    with _client(tmp_path) as client:
+        _upload(client, frames=2)
+        gif = client.get("/download/gif?state=upload&fps=8&loop=1")
+        bad = client.get("/download/gif?fps=999")
+    assert gif.status_code == 200
+    assert bad.status_code == 400

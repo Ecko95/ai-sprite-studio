@@ -366,6 +366,14 @@ async def download(request) -> Response:
             raise ValueError
     except (TypeError, ValueError):
         return _error("scale must be an integer between 1 and 8", status_code=400)
+    try:
+        fps = int(request.query_params.get("fps", "0"))
+        if not 0 <= fps <= 60:
+            raise ValueError
+    except (TypeError, ValueError):
+        return _error("fps must be an integer between 1 and 60", status_code=400)
+    loop_param = request.query_params.get("loop")
+    loop = None if loop_param is None else loop_param in {"1", "true", "on"}
 
     def run_export() -> tuple[bytes, str, str]:
         view = engine.run_snapshot(project_id)
@@ -381,7 +389,7 @@ async def download(request) -> Response:
                 for index, data in enumerate(frames):
                     bundle.writestr(f"frame-{index:02d}.png", scale_nearest(data, scale))
             return archive.getvalue(), "application/zip", "frames-1024.zip" if scale == 4 else "frames.zip"
-        gif = frames_to_gif(frames, fps=view.fps, loop=view.loop, factor=scale)
+        gif = frames_to_gif(frames, fps=fps if fps else view.fps, loop=view.loop if loop is None else loop, factor=scale)
         return gif, "image/gif", f"{view.state}.gif"
 
     try:
