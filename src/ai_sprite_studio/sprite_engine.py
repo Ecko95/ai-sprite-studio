@@ -152,6 +152,25 @@ class CurationSnapshot:
 
 
 @dataclass(frozen=True)
+class SpriteRunView:
+    """A read-only snapshot of an extracted run for the local curator UI."""
+
+    run_revision: str
+    cell: dict[str, int]
+    state: str
+    request_frames: int
+    fps: int
+    loop: bool
+    pixel_artifact_ids: tuple[UUID, ...]
+    plain_artifact_ids: tuple[UUID, ...]
+    curation: dict[str, Any] | None
+    has_atlas: bool
+    atlas_artifact_id: UUID | None
+    manifest_artifact_id: UUID | None
+    character_id: str
+
+
+@dataclass(frozen=True)
 class ComposeResult:
     atlas_artifact_id: UUID
     manifest_artifact_id: UUID
@@ -440,6 +459,45 @@ class SpriteEngine:
                 return self._curation_snapshot(
                     run_dir, state, payload, revision, curation_ids[0] if curation_ids else None
                 )
+
+    @_serialized_engine_mutation
+    def run_snapshot(self, project_id: UUID | str) -> SpriteRunView:
+        """Assemble the extracted-run view the local curator UI renders."""
+
+        with _curation_boundary("run snapshot"):
+            project = self.store.load(project_id)
+            run_dir, state = self._extracted_state(project.id)
+            request = self._request(run_dir)
+            entry = request["states"][_UPLOAD_STATE]
+            with read_guard(run_dir):
+                pixel_ids = self._current_pixel_dependencies(project.id, run_dir, state)
+                plain_ids = self._state_uuids(state, "plain_artifact_ids")
+                curation_ids = self._current_curation_dependencies(project.id, run_dir, state)
+                payload = self._load_curation(run_dir)
+                revision = run_revision(run_dir)
+                if self._current_curation_dependencies(project.id, run_dir, state) != curation_ids:
+                    raise SpriteEngineError("sprite curation provenance is unavailable")
+            cell = request.get("cell", {})
+            atlas_id = state.get("atlas_artifact_id")
+            manifest_id = state.get("manifest_artifact_id")
+            return SpriteRunView(
+                run_revision=revision,
+                cell={
+                    "width": int(cell.get("width", 256)),
+                    "height": int(cell.get("height", 256)),
+                },
+                state=_UPLOAD_STATE,
+                request_frames=int(entry["frames"]),
+                fps=int(entry.get("fps", 1)),
+                loop=bool(entry.get("loop", False)),
+                pixel_artifact_ids=pixel_ids,
+                plain_artifact_ids=plain_ids,
+                curation=payload,
+                has_atlas="atlas_artifact_id" in state,
+                atlas_artifact_id=UUID(atlas_id) if isinstance(atlas_id, str) else None,
+                manifest_artifact_id=UUID(manifest_id) if isinstance(manifest_id, str) else None,
+                character_id=f"upload-{project.id.hex}",
+            )
 
     @_serialized_engine_mutation
     def stamp_curation(

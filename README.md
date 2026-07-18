@@ -92,6 +92,63 @@ uv run ai-sprite-studio serve --workspace /path/to/workspace
 `serve` binds to `127.0.0.1`, prints the actual URL (e.g. `http://127.0.0.1:8765/`)
 to stdout, and attempts to open a browser. Stop with `Ctrl-C`.
 
+### Generate a base character (gpt-image)
+
+`genbase` renders the pinned `base_generation` prompt (from
+`ai-pixel-snapped-game-sprites`) with your concept, calls OpenAI `gpt-image-1` at the
+locked `1024×1024` / `high` settings, writes the chroma-green PNG (plus a
+`.prompt.md` provenance sidecar), and ingests it as an immutable `input` artifact so
+the canonical snap (`extract`) can run next.
+
+Set `OPENAI_API_KEY` in the environment or a local `.env` (git-ignored, loaded
+automatically):
+
+```bash
+echo 'OPENAI_API_KEY=sk-...' > .env    # or: export OPENAI_API_KEY=sk-...
+uv run ai-sprite-studio genbase --concept "young pirate boy in a black tricorn hat" --out base.png
+uv run ai-sprite-studio genbase --concept "..." --project <existing-project-id> --workspace /path/to/ws
+```
+
+`--costume` and `--silhouette` refine the identity tokens; `--model`/`--quality`
+override the defaults. This spends OpenAI credits — it is the only path here that
+calls a provider. Feed the result into `SpriteEngine.prepare(...)` → `extract(...)`
+to snap it to the grid.
+
+### Generate an action pose board (gpt-image)
+
+`genactions` turns a short action intent into the full-spec `action_poseboards`
+prompt (prompt 04) — filling per-frame motion beats, grid, and the locked direction
+phrasing — then calls gpt-image as a **multi-image edit** (your snapped anchor + the
+pinned pose-board guide) to produce a `1536×1024` pose board on chroma green:
+
+```bash
+uv run ai-sprite-studio genactions --project <project-id> --state attack --out attack.png
+uv run ai-sprite-studio genactions --project <id> --state idle --anchor down-snapped.png \
+  --frames-desc "10-frame idle: slow breathing, tiny head bob" --out idle.png
+```
+
+States come from the project (`idle`/`attack`/`hurt`/`jump`/`death`); frame counts are
+the locked presets. `--direction` is `down` only until directional anchors exist. The
+board is an **intermediate** — recover + snap its frames via the frame-recovery stage;
+never grid-crop it (poses cross cell borders by design). Spends OpenAI credits.
+
+### Prep an existing image for snapping
+
+The snap keys alpha off the flat `#00FF00` background. An image on white (or any
+flat colour) won't key — the background survives as opaque pixels, and because the
+whole cell is then "the sprite", the snap can't center it either. `prep` floods the
+edge-connected background to chroma green (interior same-colour regions survive) and
+pads to a square, so the existing snap keys **and** centers it (`align_x`
+alpha-centroid, `align_y` bottom) automatically:
+
+```bash
+uv run ai-sprite-studio prep --in ghost.png --out ghost-green.png
+uv run ai-sprite-studio prep --in ghost.png --out ghost-green.png --tolerance 60 --pad 0.15
+```
+
+Then upload `ghost-green.png` through the curator UI (or `SpriteEngine.ingest_upload`).
+Raise `--tolerance` if a tinted background isn't fully removed.
+
 ### Workspace / data layout
 
 The default workspace is platform-specific:
