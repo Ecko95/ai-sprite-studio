@@ -81,6 +81,27 @@ def test_genbase_renders_the_prompt_and_ingests_the_generated_image(tmp_path):
     assert len(inputs) == 1
 
 
+def test_prep_floods_border_background_to_chroma_and_keeps_interior(tmp_path):
+    # White canvas, black frame, white interior hole — the hole must survive.
+    img = Image.new("RGB", (40, 40), "white")
+    for x in range(10, 30):
+        for y in range(10, 30):
+            img.putpixel((x, y), (0, 0, 0) if x in (10, 29) or y in (10, 29) else (255, 255, 255))
+    src = tmp_path / "in.png"
+    img.save(src)
+
+    out = tmp_path / "out.png"
+    assert cli.prep(source=src, out=out, tolerance=40, pad=0.25) == 0
+
+    result = Image.open(out).convert("RGB")
+    assert result.width == result.height  # padded to square
+    assert result.getpixel((0, 0)) == (0, 255, 0)  # border background is now chroma
+    # Interior white hole (border-disconnected) is untouched.
+    cx = (result.width - 40) // 2 + 20
+    cy = (result.height - 40) // 2 + 20
+    assert result.getpixel((cx, cy)) == (255, 255, 255)
+
+
 def test_cli_does_not_expose_a_non_loopback_host_option():
     with pytest.raises(SystemExit):
         cli.main(["serve", "--host", "0.0.0.0"])

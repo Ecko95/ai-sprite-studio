@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from io import BytesIO
 import os
 from pathlib import Path
 import re
@@ -58,6 +59,40 @@ def serve(workspace: str | Path, port: int) -> None:
         uvicorn.Server(config).run(sockets=[listener])
     finally:
         listener.close()
+
+
+_CHROMA = (0, 255, 0)  # #00FF00 — the snap keys alpha off this exact background
+
+
+def _prep_to_chroma(data: bytes, *, tolerance: int, pad: float) -> bytes:
+    """Flood the border background to chroma green so the snap can key + center it.
+
+    Only the background connected to the canvas edges is replaced, so interior
+    same-colour pixels (a white shirt, the inside of a shape) survive.
+    """
+    from PIL import Image, ImageDraw
+
+    with Image.open(BytesIO(data)) as opened:
+        img = opened.convert("RGB")
+    width, height = img.size
+    for corner in ((0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)):
+        ImageDraw.floodfill(img, corner, _CHROMA, thresh=tolerance)
+    if pad > 0:
+        margin = round(max(width, height) * pad)
+        side = max(width, height) + 2 * margin
+        canvas = Image.new("RGB", (side, side), _CHROMA)
+        canvas.paste(img, ((side - width) // 2, (side - height) // 2))
+        img = canvas
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def prep(*, source: Path, out: Path, tolerance: int, pad: float) -> int:
+    out = Path(out)
+    out.write_bytes(_prep_to_chroma(Path(source).read_bytes(), tolerance=tolerance, pad=pad))
+    print(f"wrote {out}  (upload this; the snap keys + centers off {'#%02X%02X%02X' % _CHROMA})")
+    return 0
 
 
 def _openai_image_bytes(prompt: str, *, model: str, quality: str) -> bytes:
@@ -135,7 +170,15 @@ def main(argv: list[str] | None = None) -> int:
     gen_parser.add_argument("--model", default="gpt-image-1")
     gen_parser.add_argument("--quality", default="high", choices=["low", "medium", "high", "auto"])
 
+    prep_parser = commands.add_parser("prep", help="strip a flat background to chroma green so an existing image snaps cleanly")
+    prep_parser.add_argument("--in", dest="source", type=Path, required=True)
+    prep_parser.add_argument("--out", type=Path, default=Path("prepped.png"))
+    prep_parser.add_argument("--tolerance", type=int, default=40, help="colour distance treated as background (0-255)")
+    prep_parser.add_argument("--pad", type=float, default=0.1, help="green margin as a fraction of the longest side; 0 keeps size")
+
     arguments = parser.parse_args(argv)
+    if arguments.command == "prep":
+        return prep(source=arguments.source, out=arguments.out, tolerance=arguments.tolerance, pad=arguments.pad)
     if arguments.command == "genbase":
         return genbase(
             workspace=arguments.workspace,

@@ -114,6 +114,23 @@ override the defaults. This spends OpenAI credits — it is the only path here t
 calls a provider. Feed the result into `SpriteEngine.prepare(...)` → `extract(...)`
 to snap it to the grid.
 
+### Prep an existing image for snapping
+
+The snap keys alpha off the flat `#00FF00` background. An image on white (or any
+flat colour) won't key — the background survives as opaque pixels, and because the
+whole cell is then "the sprite", the snap can't center it either. `prep` floods the
+edge-connected background to chroma green (interior same-colour regions survive) and
+pads to a square, so the existing snap keys **and** centers it (`align_x`
+alpha-centroid, `align_y` bottom) automatically:
+
+```bash
+uv run ai-sprite-studio prep --in ghost.png --out ghost-green.png
+uv run ai-sprite-studio prep --in ghost.png --out ghost-green.png --tolerance 60 --pad 0.15
+```
+
+Then upload `ghost-green.png` through the curator UI (or `SpriteEngine.ingest_upload`).
+Raise `--tolerance` if a tinted background isn't fully removed.
+
 ### Workspace / data layout
 
 The default workspace is platform-specific:
