@@ -81,6 +81,54 @@ def test_genbase_renders_the_prompt_and_ingests_the_generated_image(tmp_path):
     assert len(inputs) == 1
 
 
+def test_genactions_builds_the_action_prompt_and_feeds_anchor_plus_guide(tmp_path):
+    from ai_sprite_studio.contracts import ProjectConfig
+    from ai_sprite_studio.project_store import ProjectStore
+    from ai_sprite_studio.sprite_engine import SpriteEngine
+
+    store = ProjectStore(tmp_path / "ws")
+    project = store.create(ProjectConfig(name="Hero"))
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (1024, 1024), "#00FF00").save(buffer, format="PNG")
+    anchor = SpriteEngine(store).ingest_upload(
+        project.id, buffer.getvalue(), media_type="image/png", filename="base.png"
+    )
+
+    captured = {}
+
+    def fake_generate(prompt, images, *, model, size, quality):
+        captured.update(prompt=prompt, images=images, size=size)
+        out = io.BytesIO()
+        Image.new("RGB", (1536, 1024), "#00FF00").save(out, format="PNG")
+        return out.getvalue()
+
+    out = tmp_path / "attack.png"
+    code = cli.genactions(
+        workspace=tmp_path / "ws",
+        project_id=str(project.id),
+        state_id="attack",
+        direction="down",
+        anchor=None,  # falls back to the ingested input
+        frames_desc=None,
+        constraints=cli._DEFAULT_ACTION_CONSTRAINTS,
+        out=out,
+        model="gpt-image-1",
+        quality="high",
+        _generate=fake_generate,
+    )
+
+    assert code == 0
+    # Short intent expanded into the pinned full-spec prompt.
+    assert "attack" in captured["prompt"] and "4-frame" in captured["prompt"]
+    assert "front view, facing down" in captured["prompt"]
+    assert captured["size"] == "1536x1024"
+    # gpt-image edit receives BOTH the anchor and the pinned pose-board guide.
+    assert len(captured["images"]) == 2 and captured["images"][0] == store.read_artifact_bytes(project.id, anchor.id)
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    assert out.with_suffix(".png.prompt.md").exists()
+
+
 def test_prep_floods_border_background_to_chroma_and_keeps_interior(tmp_path):
     # White canvas, black frame, white interior hole — the hole must survive.
     img = Image.new("RGB", (40, 40), "white")

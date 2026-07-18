@@ -114,6 +114,24 @@ override the defaults. This spends OpenAI credits — it is the only path here t
 calls a provider. Feed the result into `SpriteEngine.prepare(...)` → `extract(...)`
 to snap it to the grid.
 
+### Generate an action pose board (gpt-image)
+
+`genactions` turns a short action intent into the full-spec `action_poseboards`
+prompt (prompt 04) — filling per-frame motion beats, grid, and the locked direction
+phrasing — then calls gpt-image as a **multi-image edit** (your snapped anchor + the
+pinned pose-board guide) to produce a `1536×1024` pose board on chroma green:
+
+```bash
+uv run ai-sprite-studio genactions --project <project-id> --state attack --out attack.png
+uv run ai-sprite-studio genactions --project <id> --state idle --anchor down-snapped.png \
+  --frames-desc "10-frame idle: slow breathing, tiny head bob" --out idle.png
+```
+
+States come from the project (`idle`/`attack`/`hurt`/`jump`/`death`); frame counts are
+the locked presets. `--direction` is `down` only until directional anchors exist. The
+board is an **intermediate** — recover + snap its frames via the frame-recovery stage;
+never grid-crop it (poses cross cell borders by design). Spends OpenAI credits.
+
 ### Prep an existing image for snapping
 
 The snap keys alpha off the flat `#00FF00` background. An image on white (or any

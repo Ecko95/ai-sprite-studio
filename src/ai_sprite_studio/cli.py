@@ -105,6 +105,113 @@ def _openai_image_bytes(prompt: str, *, model: str, quality: str) -> bytes:
     return base64.b64decode(result.data[0].b64_json)
 
 
+# gpt-image can't emit the 2048x1536 hires board; 1536x1024 is its nearest 4x3-ish
+# landscape. The grid stays 4x3 — the guide is a composition hint, not pixel-exact.
+_POSEBOARD_SIZE = "1536x1024"
+_POSEBOARD_GRID = (4, 3)  # cols, rows — from the hires preset (prompt 04)
+
+# Short intent -> full per-frame script. This is the "curate to full spec" step:
+# the pinned template supplies the pixel discipline, this supplies the motion beats.
+_FRAME_SCRIPTS = {
+    "idle": "A gentle {N}-frame idle loop: subtle breathing and weight shift in place. First and last frames match for a seamless loop. No stepping, no turning.",
+    "attack": "A {N}-frame attack: ready stance, wind-up, strike at full extension, then recovery to the ready stance. Frame 1 and the final frame bookend the motion.",
+    "hurt": "A {N}-frame hurt reaction: a sharp recoil from an impact, then settle back toward neutral. Brief and readable.",
+    "jump": "A {N}-frame jump: crouch, launch upward, apex, then land and recover. Keep the character centred horizontally.",
+    "death": "A {N}-frame death: stagger, lose balance, fall, and come to rest. The final frame is the resting pose.",
+}
+_GENERIC_SCRIPT = "A {N}-frame {ACTION} sequence that reads as one coherent short animation, with the first and last frames bookending the motion."
+_DEFAULT_ACTION_CONSTRAINTS = "Keep body proportions, palette, and outfit identical across every frame. No motion blur, no smear frames, no weapon trails. Each pose sits fully inside its cell area."
+
+
+def _openai_edit_bytes(prompt: str, images: list[bytes], *, model: str, size: str, quality: str) -> bytes:
+    from dotenv import load_dotenv
+    from openai import OpenAI
+
+    load_dotenv()
+    client = OpenAI()
+    files = [(f"image_{index}.png", data, "image/png") for index, data in enumerate(images)]
+    result = client.images.edit(model=model, image=files, prompt=prompt, size=size, quality=quality, n=1)
+    return base64.b64decode(result.data[0].b64_json)
+
+
+def genactions(
+    *,
+    workspace: str | Path,
+    project_id: str,
+    state_id: str,
+    direction: str,
+    anchor: Path | None,
+    frames_desc: str | None,
+    constraints: str,
+    out: Path,
+    model: str,
+    quality: str,
+    _generate=_openai_edit_bytes,
+) -> int:
+    from .project_store import ProjectStore
+    from .prompts import guide_for_stage, render_prompt
+
+    store = ProjectStore(workspace)
+    project = store.load(project_id)
+
+    states = {state.id: state for state in project.states}
+    if state_id not in states:
+        print(f"unknown state {state_id!r}; project has: {', '.join(states)}", file=sys.stderr)
+        return 1
+    state = states[state_id]
+
+    # Anchor bytes: an explicit snapped PNG, else the project's latest ingested input.
+    inputs = [a for a in project.artifacts if a.kind == "input" and not a.stale]
+    anchor_ref = None
+    if anchor is not None:
+        anchor_bytes = Path(anchor).read_bytes()
+    elif inputs:
+        anchor_ref = inputs[-1]
+        anchor_bytes = store.read_artifact_bytes(project.id, anchor_ref.id)
+    else:
+        print("no anchor: pass --anchor or ingest a base image first", file=sys.stderr)
+        return 1
+
+    from .prompts import _ACTION_DIRECTION_DESCRIPTIONS  # locked direction phrasing
+
+    cols, rows = _POSEBOARD_GRID
+    width, height = (int(part) for part in _POSEBOARD_SIZE.split("x"))
+    script = (frames_desc or _FRAME_SCRIPTS.get(state_id, _GENERIC_SCRIPT)).format(N=state.frames, ACTION=state_id)
+    rendered = render_prompt(
+        "action_poseboards",
+        project,
+        {
+            "ACTION": state_id,
+            "N": state.frames,
+            "COLS": cols,
+            "ROWS": rows,
+            "CANVAS_W": width,
+            "CANVAS_H": height,
+            "DIRECTION_DESCRIPTION": _ACTION_DIRECTION_DESCRIPTIONS[direction],
+            "FRAME_BY_FRAME_DESCRIPTION": script,
+            "ACTION_SPECIFIC_CONSTRAINTS": constraints,
+        },
+        direction=direction,
+        state=state,
+        artifact_inputs=[anchor_ref] if anchor_ref is not None else (),
+    )
+    match = _PROMPT_FENCE.search(rendered.text)
+    if match is None:  # pragma: no cover - pinned template always carries the fence
+        print("action_poseboards template is missing its prompt block", file=sys.stderr)
+        return 1
+    image_prompt = match.group(1).strip()
+
+    guide = guide_for_stage("action_poseboards")
+    data = _generate(image_prompt, [anchor_bytes, guide.data], model=model, size=_POSEBOARD_SIZE, quality=quality)
+
+    out = Path(out)
+    out.write_bytes(data)
+    out.with_suffix(out.suffix + ".prompt.md").write_text(rendered.text, encoding="utf-8")
+    print(f"wrote {out}  ({state.frames}-frame {state_id} pose board, {direction})")
+    print("next: recover + snap the frames (frame_recovery stage) — do NOT grid-crop; poses cross cell borders")
+    return 0
+
+
 def genbase(
     *,
     workspace: str | Path,
@@ -170,6 +277,18 @@ def main(argv: list[str] | None = None) -> int:
     gen_parser.add_argument("--model", default="gpt-image-1")
     gen_parser.add_argument("--quality", default="high", choices=["low", "medium", "high", "auto"])
 
+    act_parser = commands.add_parser("genactions", help="build the full-spec action-sheet prompt and generate a pose board with gpt-image")
+    act_parser.add_argument("--workspace", type=Path, default=default_workspace())
+    act_parser.add_argument("--project", dest="project_id", required=True, help="project id holding the base/anchor")
+    act_parser.add_argument("--state", dest="state_id", required=True, help="action state, e.g. idle/attack/hurt/jump/death")
+    act_parser.add_argument("--direction", default="down", choices=["down"], help="only 'down' until directional anchors exist")
+    act_parser.add_argument("--anchor", type=Path, default=None, help="snapped anchor PNG; defaults to the project's latest ingested input")
+    act_parser.add_argument("--frames-desc", dest="frames_desc", default=None, help="override the per-frame motion script ({N}/{ACTION} allowed)")
+    act_parser.add_argument("--constraints", default=_DEFAULT_ACTION_CONSTRAINTS)
+    act_parser.add_argument("--out", type=Path, default=Path("poseboard.png"))
+    act_parser.add_argument("--model", default="gpt-image-1")
+    act_parser.add_argument("--quality", default="high", choices=["low", "medium", "high", "auto"])
+
     prep_parser = commands.add_parser("prep", help="strip a flat background to chroma green so an existing image snaps cleanly")
     prep_parser.add_argument("--in", dest="source", type=Path, required=True)
     prep_parser.add_argument("--out", type=Path, default=Path("prepped.png"))
@@ -179,6 +298,19 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     if arguments.command == "prep":
         return prep(source=arguments.source, out=arguments.out, tolerance=arguments.tolerance, pad=arguments.pad)
+    if arguments.command == "genactions":
+        return genactions(
+            workspace=arguments.workspace,
+            project_id=arguments.project_id,
+            state_id=arguments.state_id,
+            direction=arguments.direction,
+            anchor=arguments.anchor,
+            frames_desc=arguments.frames_desc,
+            constraints=arguments.constraints,
+            out=arguments.out,
+            model=arguments.model,
+            quality=arguments.quality,
+        )
     if arguments.command == "genbase":
         return genbase(
             workspace=arguments.workspace,
