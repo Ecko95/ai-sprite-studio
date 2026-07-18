@@ -71,12 +71,14 @@
 				<button type="button" class="ghost" id="ref-copy">Copy prompt</button>
 			</div>
 			<div class="progress" id="ref-progress"><div class="bar"></div></div>
+			<div class="field">
+				<label for="ref-manual-file">…or upload your own reference image</label>
+				<input type="file" id="ref-manual-file" accept="image/png,image/jpeg,image/webp">
+				<small class="hint">already have a character? load it here and skip generation — it becomes the reference for Higgsfield.</small>
+			</div>
 			<div class="fallback-note" id="ref-fallback">
 				OPENAI_API_KEY is not set — generation is unavailable here. Copy the prompt above,
-				generate the image in your tool of choice, then load the result below to preview it.
-				<div class="field" style="margin-top:8px;">
-					<input type="file" id="ref-manual-file" accept="image/png,image/jpeg,image/webp">
-				</div>
+				generate the image in your tool of choice, then load the result via the upload field above.
 			</div>
 			<div class="reference-preview" id="ref-preview">
 				<img id="ref-image" alt="Character reference preview">
