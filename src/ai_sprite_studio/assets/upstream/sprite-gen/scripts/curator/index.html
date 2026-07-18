@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>sprite-gen curation</title>
+    <link rel="stylesheet" href="/curator.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="title">
+        <strong>sprite-gen</strong> <span id="t-title"></span>
+        <span id="character" class="muted"></span>
+      </div>
+      <div class="actions">
+        <span id="status" class="status"></span>
+        <button id="lang-toggle" type="button" class="ghost"></button>
+        <label id="pxgrid-wrap" class="pp-apply" hidden>
+          <input type="checkbox" id="pxgrid-check" />
+          <span id="pxgrid-label"></span>
+        </label>
+        <label id="pp-wrap" class="pp-apply" hidden>
+          <input type="checkbox" id="pp-apply" />
+          <span id="pp-label"></span>
+        </label>
+        <button id="grid-toggle" type="button" class="ghost" hidden></button>
+        <button id="export" type="button"></button>
+        <button id="export-gif" type="button"></button>
+        <button id="compose" type="button"></button>
+      </div>
+    </header>
+    <div id="layout">
+      <aside id="sidebar"></aside>
+      <button id="sidebar-toggle" type="button" aria-label="toggle file tree">
+        <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
+          <path d="M10.5 2.5 5 8l5.5 5.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <main id="states"></main>
+    </div>
+    <footer class="hintbar" id="hintbar"></footer>
+    <script src="/curator.js"></script>
+  </body>
+</html>

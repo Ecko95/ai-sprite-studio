@@ -1,0 +1,477 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "LICENSE",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/LICENSE",
+      "sha256": "40863642f7315c14d1dc80aca87ae392d642f70a3a582dc1a6370755a0707359",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "prompts/01-south-anchor.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/prompts/01-south-anchor.md",
+      "sha256": "f35ebfdbda144aafa6b6920fb7d80198060f73ec3379788fd3bd40109e82c7a2",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "prompts/02-pixel-snap.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/prompts/02-pixel-snap.md",
+      "sha256": "c6f0b4773b5689679695a803aed51709363d275a0de926f6bcf78040cb76306a",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "prompts/03-directional-anchors.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/prompts/03-directional-anchors.md",
+      "sha256": "650b03cc94bc1167b993cdc334a8f7f2119be559ad56343e1d49d6948e48616f",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "prompts/04-action-spritesheet.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/prompts/04-action-spritesheet.md",
+      "sha256": "6a8586da63b82e2feb0e4ed3ef43d9b793f6745cf119eb06f424384b7e78614a",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "prompts/05-frame-recovery.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/prompts/05-frame-recovery.md",
+      "sha256": "56e61866d0f6cc87209924d9404a86b3d4872b22cd994a190827c2ab30aba654",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "prompts/06-walk-cycle-i2v.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/prompts/06-walk-cycle-i2v.md",
+      "sha256": "4ae4cb3afe62280fcb2fd47e4a3fbb203901b1d060ee17dcf4492737a0288f32",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "prompts/07-per-frame-snap.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/prompts/07-per-frame-snap.md",
+      "sha256": "1bd5c0eecffaec5f5a1d0fe0de8ce740df6beda245e5002fa70412157b4c5611",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "prompts/08-runtime-normalize-and-align.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/prompts/08-runtime-normalize-and-align.md",
+      "sha256": "33024f62f658dd1090f87cd45b12a278ec6ab7ef5c869731a3b32f1aa98a3e68",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/anchors/direction-anchors-nsew.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/anchors/direction-anchors-nsew.png",
+      "sha256": "1a37b45176c7184e037e1c8d17845281b1aa31028fa051cde20e0c5c32bda1aa",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/anchors/s-snapped-1024-chroma.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/anchors/s-snapped-1024-chroma.png",
+      "sha256": "3f887282499bd41d52028dd152fe505e5396b9136468305f31697cd42ca66407",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/anchors/s-snapped-1024.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/anchors/s-snapped-1024.png",
+      "sha256": "24f58ce3233820aaa0ed305d2adaf8512ba42c641d4133100a6a3917d941ce7b",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/anchors/w-raw.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/anchors/w-raw.png",
+      "sha256": "9531bd22141c2a7c631dca1d71a6afea11f6c2329c6f7100600f587beded8fac",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/anchors/w-snapped-1024-chroma-canonical.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/anchors/w-snapped-1024-chroma-canonical.png",
+      "sha256": "ad6b00153df2e8fd0ea6b598cb6576402c7360f0e3b118934a467467c859a00b",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/anchors/w-snapped-native-102x101.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/anchors/w-snapped-native-102x101.png",
+      "sha256": "fd6039306122f8d2c23f9432e61bd4871024cd5028c453a83df8fb4eebe16fde",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/diagrams/anchor-guide.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/diagrams/anchor-guide.png",
+      "sha256": "672ff835f9e875f9aac62add9651114e040834353c5902e188140d75b2cfc277",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/diagrams/post-generation-pipeline.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/diagrams/post-generation-pipeline.png",
+      "sha256": "22c4cb624a155dd5344d4b280e4c96eef625e16ba3613b3ebce392303abf0495",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/grids/alternating-1024x1024.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/grids/alternating-1024x1024.png",
+      "sha256": "a5b38ebe555e08525972690b7eda425a721b389773ba5e81e6188159a6e230b0",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/grids/alternating-2048x1536-4x3-pose-board.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/grids/alternating-2048x1536-4x3-pose-board.png",
+      "sha256": "8da24c23e55bbf66f087787bed41d20770b0919b7923a4ccc107beb9941e2415",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/poseboard/attack-w-bgclean-vs-fringe-cleaned.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/poseboard/attack-w-bgclean-vs-fringe-cleaned.png",
+      "sha256": "bf7f4a95c6d09f7fede1d79c3d692a6c4d02e795b1b100499a67a16fab46e287",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/poseboard/attack-w-generated-poseboard.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/poseboard/attack-w-generated-poseboard.png",
+      "sha256": "9b23e90a91fb0a75b8349964081272acc600415f60f63034a8b8d80128a6cb92",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/poseboard/attack-w-naive-grid-cells-only.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/poseboard/attack-w-naive-grid-cells-only.png",
+      "sha256": "7344fdfd0029524b45b0a69044b4573bf7dcda1cd37505c6ca0b3335370121cb",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/poseboard/attack-w-naive-grid-vs-recovered.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/poseboard/attack-w-naive-grid-vs-recovered.png",
+      "sha256": "c539ccf22025b8729849090cdc77fbc0fed5c7b298f77b4a31bad4b28ce8fd45",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/poseboard/attack-w-pixel-snapped-strike-frame.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/poseboard/attack-w-pixel-snapped-strike-frame.png",
+      "sha256": "6ce8a06e901d6b3b9fcfff4ff4966947acbc5abd6412ba1827ee8e2e23828be8",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/poseboard/attack-w-recovered-vs-native-review.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/poseboard/attack-w-recovered-vs-native-review.png",
+      "sha256": "713561b3835784246e8ef819d1b30a7e4b4f80f5e1849d6eb3a3bd66e3c68532",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/problems/bleeding-naive-grid-animated.gif",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/problems/bleeding-naive-grid-animated.gif",
+      "sha256": "352841e052ed63779ac4c28ddf6e10d2010c77b134e461e11d6952c205d7d6f5",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/problems/drift-after-locked-attack.gif",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/problems/drift-after-locked-attack.gif",
+      "sha256": "c84b00c91f05d798639cc0dd3db576b88d5e99f651854f968588810991c7b2fd",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/problems/drift-before-after-side-by-side.gif",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/problems/drift-before-after-side-by-side.gif",
+      "sha256": "a49f1cc323080c4c9acd4fe0149aec9841495dfcad82faaa23f436a03ccb1c2a",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/problems/drift-before-sliding-attack.gif",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/problems/drift-before-sliding-attack.gif",
+      "sha256": "4aac51cdfb3281d2e20708b609f207b9fa5082603bd033ab414ad04b513be87e",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/problems/height-drift-attack.gif",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/problems/height-drift-attack.gif",
+      "sha256": "c016867f8e70f32ed43594f3bb90c3a3fa60c72245f17359125251023f6af0b6",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/problems/mixel-vs-real-side-by-side.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/problems/mixel-vs-real-side-by-side.png",
+      "sha256": "2367d20f4b89279c03dd86c7250e4f0b696ac0fb44ddf16c71c7e3e0298f908f",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/problems/mixel-zoom-raw.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/problems/mixel-zoom-raw.png",
+      "sha256": "baa9ac7183b464296b245e946f79a048f9ac63995ebb1df3874c5c48bbbbc3e3",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/problems/real-pixels-zoom-snapped.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/problems/real-pixels-zoom-snapped.png",
+      "sha256": "bf2cb4edb41679975f15658fb9df74292a79c4e63ef5166335e287241e0b5127",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/prompt-discipline/bad-detail-heavy-raw.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/prompt-discipline/bad-detail-heavy-raw.png",
+      "sha256": "23c10e7663c300ac6dc5a71e1e3b1ea9272c7b0dfd31d403db065217fcb23313",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/prompt-discipline/bad-detail-heavy-snapped-174x177.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/prompt-discipline/bad-detail-heavy-snapped-174x177.png",
+      "sha256": "442e823edfb4aeae98c4493ed43e3409564df35374122138404ac52c7149034f",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/prompt-discipline/good-restrictive-raw.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/prompt-discipline/good-restrictive-raw.png",
+      "sha256": "dc2857dbc76ddb304ea95e8d02e3c39edfcb6ab14ff7fffe7779c1c46daea5ff",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/prompt-discipline/good-restrictive-snapped-96x96.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/prompt-discipline/good-restrictive-snapped-96x96.png",
+      "sha256": "0d87a2fc3599626fb19df1be627529a4d7a71ad8ea2fa26af600d3238100024f",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/runtime/attack-w-preview.gif",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/runtime/attack-w-preview.gif",
+      "sha256": "bf8463bd9621a11badb9a528a3b979a45be280b97f061f3c59b3319e4600cd16",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/runtime/attack-w-runtime-spritesheet.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/runtime/attack-w-runtime-spritesheet.png",
+      "sha256": "e424131e567dfdff204d0ffc6e180036c2b8af4493862a55a909957670618b15",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/runtime/pirate-w-all-actions-combined.gif",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/runtime/pirate-w-all-actions-combined.gif",
+      "sha256": "630c8065f22a233890bcb91031a1ca99fb4666c21fa2959f6023ce025477f670",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/runtime/walk-w-preview.gif",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/runtime/walk-w-preview.gif",
+      "sha256": "db1ccb8b8b637049892608191cefb56f5c7d047e80d2c12cc68d1f320ba00c7c",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/chongdashu/ai-pixel-snapped-game-sprites",
+      "revision": "5f4c8b99a1de38a84af7dcc36af80622e5057cd6",
+      "source_path": "references/runtime/walk-w-runtime-spritesheet.png",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/ai-pixel-snapped-game-sprites/references/runtime/walk-w-runtime-spritesheet.png",
+      "sha256": "a889a237f7727d48f43c13c77975f55133ebe46922df1324506225aba2c676a6",
+      "spdx_identifier": "MIT"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "LICENSE",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/LICENSE",
+      "sha256": "4dd13869245e356246a5b770723247bbb80a8f07a181d1d3d873a1734297cdb9",
+      "spdx_identifier": "Apache-2.0"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "NOTICE",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/NOTICE",
+      "sha256": "0ac4097ea925ae623b611e489abaa5b2824146d98d04f2cdb86c95c5e2382ef0",
+      "spdx_identifier": "Apache-2.0"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "SKILL.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/SKILL.md",
+      "sha256": "5b484d917606add99655bd575d3d611eb82f41672261772e1bae3d55e5e36228",
+      "spdx_identifier": "Apache-2.0"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "docs/architecture.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/docs/architecture.md",
+      "sha256": "46e18f7e421739a209b498e55a29d5b690ebe3879b99b56850afe7497a4612a0",
+      "spdx_identifier": "Apache-2.0"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "docs/chroma-alpha.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/docs/chroma-alpha.md",
+      "sha256": "5b06492444b60cd00d4cfdf03a98e021eb92be9ebdd228587170a96550e9ac7b",
+      "spdx_identifier": "Apache-2.0"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "docs/curation.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/docs/curation.md",
+      "sha256": "47f21c3eb832211734038881f1a541030eb6c95a45cd7814c7aea6878e166ce8",
+      "spdx_identifier": "Apache-2.0"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "docs/directional-anchor-workflow.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/docs/directional-anchor-workflow.md",
+      "sha256": "60a938a4ff0afc4f5377d93cc923cabaa98711cade4fd01f943fb964c9e3e9d0",
+      "spdx_identifier": "Apache-2.0"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "docs/gen.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/docs/gen.md",
+      "sha256": "ea68e14f6296a40fdacd6f598a7348ea937cac9c644330357b74a3021b1438e6",
+      "spdx_identifier": "Apache-2.0"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "docs/locomotion-curation.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/docs/locomotion-curation.md",
+      "sha256": "ee76b3e050f29c40cf55456c1976050e1a7a5d39bc70e632abc9103215629874",
+      "spdx_identifier": "Apache-2.0"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "docs/pixel-perfect.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/docs/pixel-perfect.md",
+      "sha256": "59fe36e5e330ddc5688696369e787e4febaba90a4e7c0276e1c855d1651d3ff0",
+      "spdx_identifier": "Apache-2.0"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "docs/qa-motion.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/docs/qa-motion.md",
+      "sha256": "2556ff83dca2af2c330065eec133daca0ddf1400de7bf708337c64fefe1ce7de",
+      "spdx_identifier": "Apache-2.0"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "docs/run-contract.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/docs/run-contract.md",
+      "sha256": "7f6e45e98ecb6d43c17c92422afb460c7b316cd6929db3a9f321efcff680947f",
+      "spdx_identifier": "Apache-2.0"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "docs/sheet-slicing.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/docs/sheet-slicing.md",
+      "sha256": "9a377478e3f0aaca17d77ccbb9935dd148619b6a93f6c8be644d4bc44a6555cc",
+      "spdx_identifier": "Apache-2.0"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "docs/states-and-frames.md",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/docs/states-and-frames.md",
+      "sha256": "bd19d1d2803fbaff57bb500df223221938a1d8e135e523d5994ab47915c4c8ae",
+      "spdx_identifier": "Apache-2.0"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "scripts/curator/curator.css",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/scripts/curator/curator.css",
+      "sha256": "bfe50115eff85015485a4220bd1789994a6b9bdbe81681e977f8aefd88bfb6ae",
+      "spdx_identifier": "Apache-2.0"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "scripts/curator/curator.js",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/scripts/curator/curator.js",
+      "sha256": "dbaf58d3c61babf103fc0055cf8851e04726bfe6a8cac36692c955a395b81fdb",
+      "spdx_identifier": "Apache-2.0"
+    },
+    {
+      "repository_url": "https://github.com/aldegad/sprite-gen",
+      "revision": "606db6d89beedace80863374859752739369ba19",
+      "source_path": "scripts/curator/index.html",
+      "destination_path": "src/ai_sprite_studio/assets/upstream/sprite-gen/scripts/curator/index.html",
+      "sha256": "c82b23cbd81a72a7662e60ad8fb45857c28b484f39e6a17cd6561daeb45e2e6b",
+      "spdx_identifier": "Apache-2.0"
+    }
+  ]
+}

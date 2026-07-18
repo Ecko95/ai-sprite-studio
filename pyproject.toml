@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-sprite-studio"
+version = "0.1.0"
+description = "Local workflow for reproducible pixel-art sprite generation"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "imageio-ffmpeg",
+    "mcp",
+    "openai",
+    "pillow>=12,<13",
+    "pydantic",
+    "sprite-gen",
+    "starlette",
+    "uvicorn",
+]
+
+[project.scripts]
+ai-sprite-studio = "ai_sprite_studio.cli:main"
+
+[dependency-groups]
+build = [
+    "setuptools==80.9.0",
+    "wheel==0.45.1",
+]
+dev = [
+    "playwright",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-playwright",
+    "ruff",
+]
+
+[tool.uv]
+build-constraint-dependencies = ["setuptools==80.9.0", "wheel==0.45.1"]
+
+[tool.uv.sources]
+sprite-gen = { git = "https://github.com/aldegad/sprite-gen.git", rev = "606db6d89beedace80863374859752739369ba19" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ai_sprite_studio = ["assets/upstream/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
