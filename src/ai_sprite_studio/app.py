@@ -27,7 +27,7 @@ _CSP = "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action
 _SESSION_COOKIE = "ai_sprite_studio_session"
 # Mutating curator routes serve the vendored (token-less) UI, so they rely on
 # loopback + same-origin instead of a CSRF token for cross-site defense.
-_ORIGIN_GUARDED = frozenset({"/api/curation", "/curator/upload"})
+_ORIGIN_GUARDED = frozenset({"/api/curation", "/curator/upload", "/curator/normalize"})
 
 
 def _is_loopback_host(value: str | None) -> bool:
@@ -218,6 +218,8 @@ def create_app(workspace: str | Path, handler: JobHandler | None = None) -> Star
             Route("/api/v1/jobs/{job_id}/cancel", cancel_job, methods=["POST"]),
             Route("/curator/upload.js", curator.upload_js),
             Route("/curator/upload", curator.upload, methods=["POST"]),
+            Route("/curator/suite.js", curator.suite_js),
+            Route("/curator/normalize", curator.normalize, methods=["POST"]),
             Route("/curator", curator.curator_index),
             Route("/curator.js", curator.curator_asset),
             Route("/curator.css", curator.curator_asset),

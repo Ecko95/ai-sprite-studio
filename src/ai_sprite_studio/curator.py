@@ -98,9 +98,43 @@ async def upload_js(request) -> Response:
 async def curator_index(request) -> Response:
     if _active(request) is None:
         return RedirectResponse("/", status_code=303)
-    return Response(
-        (_CURATOR_DIR / "index.html").read_bytes(), media_type="text/html; charset=utf-8"
+    # The vendored index stays pristine on disk; the editing-suite script is
+    # injected at serve time so upstream diffs stay clean.
+    page = (_CURATOR_DIR / "index.html").read_bytes()
+    page = page.replace(
+        b"</body>", b'<script src="/curator/suite.js" defer></script></body>'
     )
+    return Response(page, media_type="text/html; charset=utf-8")
+
+
+async def suite_js(request) -> Response:
+    data = files("ai_sprite_studio").joinpath("assets/curator-suite.js").read_bytes()
+    return Response(data, media_type="text/javascript; charset=utf-8")
+
+
+async def normalize(request) -> Response:
+    """Auto scale + recenter all frames, or nudge one frame horizontally."""
+    project_id = _active(request)
+    if project_id is None:
+        return _error("no active run", status_code=409)
+    op = request.query_params.get("op", "auto")
+    nudge: tuple[int, int] | None = None
+    if op == "nudge":
+        try:
+            nudge = (int(request.query_params["index"]), int(request.query_params["dx"]))
+        except (KeyError, TypeError, ValueError):
+            return _error("nudge needs integer index and dx", status_code=400)
+    elif op != "auto":
+        return _error("unsupported normalize op", status_code=400)
+
+    def run() -> None:
+        _engine(request).normalize(project_id, nudge=nudge)
+
+    try:
+        await run_in_threadpool(run)
+    except (SpriteEngineError, ProjectStoreError) as exc:
+        return _error(str(exc), status_code=400)
+    return JSONResponse({})
 
 
 async def curator_asset(request) -> Response:
