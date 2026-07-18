@@ -92,6 +92,25 @@ uv run ai-sprite-studio serve --workspace /path/to/workspace
 `serve` binds to `127.0.0.1`, prints the actual URL (e.g. `http://127.0.0.1:8765/`)
 to stdout, and attempts to open a browser. Stop with `Ctrl-C`.
 
+### Generate a base character (gpt-image)
+
+`genbase` renders the pinned `base_generation` prompt (from
+`ai-pixel-snapped-game-sprites`) with your concept, calls OpenAI `gpt-image-1` at the
+locked `1024×1024` / `high` settings, writes the chroma-green PNG (plus a
+`.prompt.md` provenance sidecar), and ingests it as an immutable `input` artifact so
+the canonical snap (`extract`) can run next.
+
+```bash
+export OPENAI_API_KEY=sk-...
+uv run ai-sprite-studio genbase --concept "young pirate boy in a black tricorn hat" --out base.png
+uv run ai-sprite-studio genbase --concept "..." --project <existing-project-id> --workspace /path/to/ws
+```
+
+`--costume` and `--silhouette` refine the identity tokens; `--model`/`--quality`
+override the defaults. This spends OpenAI credits — it is the only path here that
+calls a provider. Feed the result into `SpriteEngine.prepare(...)` → `extract(...)`
+to snap it to the grid.
+
 ### Workspace / data layout
 
 The default workspace is platform-specific:

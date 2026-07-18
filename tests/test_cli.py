@@ -1,4 +1,5 @@
 import http.client
+import io
 import os
 import re
 import select
@@ -9,6 +10,7 @@ import time
 from urllib.parse import urlsplit
 
 import pytest
+from PIL import Image
 
 from ai_sprite_studio import cli
 
@@ -34,6 +36,49 @@ def test_serve_reserves_a_loopback_port_and_opens_its_exact_url(tmp_path, monkey
     assert opened == [url]
     assert observed["config"].host == "127.0.0.1"
     assert observed["address"] == ("127.0.0.1", int(url.split(":")[2][:-1]))
+
+
+def test_genbase_renders_the_prompt_and_ingests_the_generated_image(tmp_path):
+    from ai_sprite_studio.contracts import ProjectConfig
+    from ai_sprite_studio.project_store import ProjectStore
+
+    store = ProjectStore(tmp_path / "ws")
+    project = store.create(ProjectConfig(name="Pirate"))
+
+    captured = {}
+
+    def fake_generate(prompt, *, model, quality):
+        captured.update(prompt=prompt, model=model, quality=quality)
+        buffer = io.BytesIO()
+        Image.new("RGB", (1024, 1024), "#00FF00").save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    out = tmp_path / "base.png"
+    code = cli.genbase(
+        workspace=tmp_path / "ws",
+        concept="young pirate boy in a black tricorn hat",
+        costume=cli._DEFAULT_COSTUME,
+        silhouette=cli._DEFAULT_SILHOUETTE,
+        name="ignored",
+        out=out,
+        model="gpt-image-1",
+        quality="high",
+        project_id=str(project.id),
+        _generate=fake_generate,
+    )
+
+    assert code == 0
+    # The concept is threaded into the pinned prompt, not the surrounding provenance doc.
+    assert "young pirate boy in a black tricorn hat" in captured["prompt"]
+    assert "#00FF00" in captured["prompt"] and "```" not in captured["prompt"]
+    assert captured["model"] == "gpt-image-1" and captured["quality"] == "high"
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    assert out.with_suffix(".png.prompt.md").exists()
+
+    # The generated image is a real, snappable input artifact in the store.
+    reloaded = store.load(project.id)
+    inputs = [a for a in reloaded.artifacts if a.kind == "input"]
+    assert len(inputs) == 1
 
 
 def test_cli_does_not_expose_a_non_loopback_host_option():
