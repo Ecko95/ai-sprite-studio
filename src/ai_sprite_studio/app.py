@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from html import escape
+from importlib.resources import files
 import ipaddress
 from pathlib import Path
 import secrets
@@ -27,7 +28,15 @@ _CSP = "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action
 _SESSION_COOKIE = "ai_sprite_studio_session"
 # Mutating curator routes serve the vendored (token-less) UI, so they rely on
 # loopback + same-origin instead of a CSRF token for cross-site defense.
-_ORIGIN_GUARDED = frozenset({"/api/curation", "/curator/upload", "/curator/normalize"})
+_ORIGIN_GUARDED = frozenset(
+    {
+        "/api/curation",
+        "/curator/upload",
+        "/curator/normalize",
+        "/curator/video-upload",
+        "/curator/reference",
+    }
+)
 
 
 def _is_loopback_host(value: str | None) -> bool:
@@ -124,7 +133,9 @@ class LocalSecurityMiddleware:
                     api_error("csrf_failed", "A valid CSRF token is required", status_code=403)
                 )(scope, receive, send)
                 return
-        elif scope["path"] in _ORIGIN_GUARDED and scope["method"] == "POST":
+        elif (scope["path"] in _ORIGIN_GUARDED and scope["method"] == "POST") or (
+            scope["path"].startswith("/curator/video/") and scope["method"] == "DELETE"
+        ):
             if not _same_loopback_origin(headers.get("origin"), host):
                 await _secure(
                     api_error("invalid_origin", "Same-origin local access is required", status_code=403)
@@ -149,38 +160,8 @@ async def _root(request):
         session_id = secrets.token_urlsafe(32)
         csrf_token = secrets.token_urlsafe(32)
         sessions[session_id] = csrf_token
-    response = HTMLResponse(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-        f"<meta name=\"csrf-token\" content=\"{escape(csrf_token)}\">"
-        "<title>AI Sprite Studio</title>"
-        "<link rel=\"stylesheet\" href=\"/studio.css\"></head><body>"
-        "<main class=\"studio\">"
-        "<header class=\"studio-head\"><h1>AI Sprite Studio</h1>"
-        "<p class=\"tagline\">Upload one image, a sprite sheet, or several per-frame images, then curate.</p></header>"
-        "<form id=\"upload\" class=\"card\">"
-        "<div class=\"field dropzone\"><label>Image(s)"
-        "<input type=\"file\" name=\"file\" multiple accept=\"image/png,image/jpeg,image/webp\" required></label>"
-        "<small class=\"hint\">pick multiple = one image per frame</small></div>"
-        "<div class=\"field check-row\"><label><input type=\"checkbox\" name=\"autosplit\"> Sprite sheet &mdash; auto-detect frames</label>"
-        "<small class=\"hint\">recommended for a sheet: finds frames by background gaps, ignores empty rows/margins</small></div>"
-        "<div class=\"field num-row\"><label>Frames</label>"
-        "<div class=\"controls\"><input type=\"number\" name=\"frames\" value=\"4\" min=\"1\" max=\"12\"></div>"
-        "<small class=\"hint\">ignored for multiple files / auto-detect</small></div>"
-        "<div class=\"field num-row\"><label>Manual grid</label>"
-        "<div class=\"controls\">"
-        "<label>cols <input type=\"number\" name=\"cols\" value=\"0\" min=\"0\" max=\"12\"></label>"
-        "<label>rows <input type=\"number\" name=\"rows\" value=\"0\" min=\"0\" max=\"12\"></label></div>"
-        "<small class=\"hint\">manual grid fallback; leave 0 if using auto-detect</small></div>"
-        "<div class=\"field\"><label>Segmentation</label>"
-        "<select name=\"segmentation\">"
-        "<option value=\"components\">components</option>"
-        "<option value=\"projection\">projection</option></select></div>"
-        "<div class=\"submit-row\"><button type=\"submit\">Upload &amp; extract</button></div></form>"
-        "<p id=\"status\" role=\"status\"></p>"
-        "<p class=\"curator-link\"><a href=\"/curator\">Open curator</a> (after uploading)</p>"
-        "<script src=\"/curator/upload.js\"></script>"
-        "</main></body></html>"
-    )
+    page = files("ai_sprite_studio").joinpath("assets/landing.html").read_text(encoding="utf-8")
+    response = HTMLResponse(page.replace("__CSRF_TOKEN__", escape(csrf_token)))
     if request.cookies.get(_SESSION_COOKIE) != session_id:
         response.set_cookie(_SESSION_COOKIE, session_id, httponly=True, samesite="strict")
     return response
@@ -225,8 +206,26 @@ def create_app(workspace: str | Path, handler: JobHandler | None = None) -> Star
             Route("/api/v1/jobs/{job_id}/cancel", cancel_job, methods=["POST"]),
             Route("/curator/upload.js", curator.upload_js),
             Route("/curator/upload", curator.upload, methods=["POST"]),
+            Route("/curator/video-upload", curator.video_upload, methods=["POST"]),
+            Route("/curator/reference", curator.reference, methods=["POST"]),
+            Route("/curator/videos", curator.videos_list),
+            Route("/curator/video/{video_id}", curator.video_file, methods=["GET", "DELETE"]),
             Route("/curator/suite.js", curator.suite_js),
             Route("/studio.css", curator.studio_css),
+            Route("/theme.js", curator.studio_asset("theme.js", "text/javascript; charset=utf-8")),
+            Route("/landing.js", curator.studio_asset("landing.js", "text/javascript; charset=utf-8")),
+            Route(
+                "/curator/studio",
+                curator.studio_asset("curator-studio.html", "text/html; charset=utf-8"),
+            ),
+            Route(
+                "/curator/studio.js",
+                curator.studio_asset("curator-studio.js", "text/javascript; charset=utf-8"),
+            ),
+            Route(
+                "/curator/studio.css",
+                curator.studio_asset("curator-studio.css", "text/css; charset=utf-8"),
+            ),
             Route("/curator/normalize", curator.normalize, methods=["POST"]),
             Route("/curator", curator.curator_index),
             Route("/curator.js", curator.curator_asset),

@@ -38,7 +38,8 @@ except ImportError:  # pragma: no cover - descriptor-backed storage requires Uni
 MAX_INPUT_BYTES = 20 * 1024 * 1024
 MAX_INPUT_PIXELS = 16_000_000
 # Connected components retain per-region bookkeeping; projection remains explicitly available above this cap.
-MAX_COMPONENT_INPUT_PIXELS = 262_144
+# Sized for the 128-frame ceiling at 256px cells (128 * 256 * 256).
+MAX_COMPONENT_INPUT_PIXELS = 8_388_608
 _ENGINE_STATE = "sprite-engine.json"
 _UPLOAD_STATE = "upload"
 _ARTIFACT_STAGE = "sprite_upload"
@@ -228,8 +229,8 @@ class SpriteEngine:
     ) -> PreparedSpriteRun:
         """Create a numeric, upload-only component-row run without overwriting it."""
 
-        if isinstance(frames, bool) or not isinstance(frames, int) or not 1 <= frames <= 12:
-            raise SpriteEngineError("upload frame count must be between 1 and 12")
+        if isinstance(frames, bool) or not isinstance(frames, int) or not 1 <= frames <= 128:
+            raise SpriteEngineError("upload frame count must be between 1 and 128")
         project = self.store.load(project_id)
         source = self._input_artifact(project.id, input_artifact_id)
         run_dir = self.store.run_dir(project.id)

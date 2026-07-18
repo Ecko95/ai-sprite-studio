@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw
 
 from ai_sprite_studio.contracts import ProjectConfig
 from ai_sprite_studio.project_store import ProjectStore
-from ai_sprite_studio.sprite_engine import SpriteEngine, SpriteEngineError
+from ai_sprite_studio.sprite_engine import MAX_COMPONENT_INPUT_PIXELS, SpriteEngine, SpriteEngineError
 
 
 MAGENTA = (255, 0, 255, 255)
@@ -696,7 +696,7 @@ def test_components_fail_for_fused_poses_without_slot_fallback_but_projection_is
 def test_components_reject_large_input_before_upstream_but_projection_can_run(tmp_path, monkeypatch):
     store, project, engine = _project_engine(tmp_path)
     encoded = io.BytesIO()
-    Image.new("RGBA", (513, 512), MAGENTA).save(encoded, format="PNG")
+    Image.new("RGBA", (MAX_COMPONENT_INPUT_PIXELS // 512 + 1, 512), MAGENTA).save(encoded, format="PNG")
     uploaded = engine.ingest_upload(
         project.id, encoded.getvalue(), media_type="image/png", filename="large.png"
     )
@@ -723,7 +723,7 @@ def test_components_reject_large_input_before_upstream_but_projection_can_run(tm
 def test_components_gate_rechecks_verified_bytes_not_forged_metadata(tmp_path, monkeypatch):
     store, project, engine = _project_engine(tmp_path)
     encoded = io.BytesIO()
-    Image.new("RGBA", (513, 512), MAGENTA).save(encoded, format="PNG")
+    Image.new("RGBA", (MAX_COMPONENT_INPUT_PIXELS // 512 + 1, 512), MAGENTA).save(encoded, format="PNG")
     forged = store.put_artifact(
         project.id,
         encoded.getvalue(),
@@ -1370,3 +1370,20 @@ def test_compose_rejects_a_curation_pointer_with_broken_lineage(tmp_path):
 
     with pytest.raises(SpriteEngineError, match="curation provenance"):
         engine.compose(project.id)
+
+
+def test_ninety_frame_row_round_trips_prepare_extract_compose(tmp_path):
+    # The Higgsfield video workflow samples ~90-110 frames from a clip; the old
+    # 12-frame ceiling must not truncate it (limit is now 128 end to end).
+    # Chroma is passed explicitly, exactly as the curator upload paths do — the
+    # vendored auto picker misreads very wide strips' border rings.
+    store, project, engine = _project_engine(tmp_path)
+    uploaded = engine.ingest_upload(
+        project.id, _strip_png(frames=90), media_type="image/png", filename="ranger.png"
+    )
+    engine.prepare(project.id, uploaded.id, frames=90, chroma_key="#FF00FF")
+    extraction = engine.extract(project.id)
+    assert len(extraction.pixel_artifact_ids) == 90
+    composed = engine.compose(project.id)
+    atlas = _rgba(store.read_artifact_bytes(project.id, composed.atlas_artifact_id))
+    assert atlas.width >= 256  # a real atlas came back for all 90 frames

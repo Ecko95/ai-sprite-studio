@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Curator Studio — AI Sprite Studio</title>
+<script src="/theme.js"></script>
+<link rel="stylesheet" href="/studio.css">
+<link rel="stylesheet" href="/curator/studio.css">
+</head>
+<body class="studio-app">
+<header class="toolbar">
+	<div class="toolbar-brand">
+		<strong>curator studio</strong>
+		<span id="save-status" class="save-status" role="status"></span>
+	</div>
+	<div class="toolbar-actions">
+		<label class="toolbar-field">fps <input type="number" id="fps" min="1" max="60" value="12"></label>
+		<label class="toolbar-field check"><input type="checkbox" id="loop" checked> loop</label>
+		<button type="button" class="ghost" id="save-btn">Save curation</button>
+		<span class="toolbar-sep"></span>
+		<a href="/" class="toolbar-link">landing</a>
+		<a href="/curator" class="toolbar-link" title="vendored sprite-gen curator">classic curator</a>
+		<button type="button" class="theme-toggle" data-theme-toggle>☾</button>
+	</div>
+</header>
+
+<div id="empty-state" class="empty-state" hidden>
+	<div class="card">
+		<h2>No active run</h2>
+		<p>Extract frames first — from a video or an image upload on the landing page.</p>
+		<p><a href="/">← Back to the landing page</a></p>
+	</div>
+</div>
+
+<div id="layout" class="layout" hidden>
+	<aside class="timeline" aria-label="Frame timeline">
+		<div class="timeline-head">
+			<span>frames</span>
+			<span id="frame-count" class="muted"></span>
+		</div>
+		<div id="timeline-strip" class="timeline-strip"></div>
+		<p class="timeline-hint">drag to reorder · click to select · ←/→ step · space plays</p>
+	</aside>
+
+	<main class="stage-col">
+		<div class="stage-wrap">
+			<canvas id="stage" width="256" height="256"></canvas>
+		</div>
+		<div class="transport">
+			<button type="button" class="ghost" id="step-prev" title="step back">⏮</button>
+			<button type="button" class="primary" id="play-btn" title="play/pause (space)">▶</button>
+			<button type="button" class="ghost" id="step-next" title="step forward">⏭</button>
+			<span id="frame-indicator" class="frame-indicator"></span>
+			<span class="real-speed" title="playback runs at the exact fps the GIF export uses">real export speed</span>
+		</div>
+		<div class="stage-tools">
+			<span class="tools-label">normalize</span>
+			<button type="button" class="ghost" id="nudge-left" title="nudge active frame left (shift = ×5)">◀ nudge</button>
+			<button type="button" class="ghost" id="nudge-right" title="nudge active frame right (shift = ×5)">nudge ▶</button>
+			<button type="button" class="ghost" id="auto-normalize">⚖ auto normalize all</button>
+		</div>
+	</main>
+
+	<aside class="inspector" aria-label="Inspector">
+		<details open class="panel">
+			<summary>Onion skin</summary>
+			<p class="panel-hint">previous frames tint red, next frames green — per-layer visibility and opacity</p>
+			<div id="onion-layers" class="onion-layers"></div>
+		</details>
+
+		<details class="panel">
+			<summary>Exports</summary>
+			<div class="export-row">
+				<span>GIF</span>
+				<label>scale <input type="number" id="gif-scale" min="1" max="8" value="2"></label>
+				<button type="button" class="ghost" id="export-gif">Download</button>
+			</div>
+			<p class="panel-hint">GIF uses the fps + loop settings in the toolbar — the preview above plays at exactly that speed.</p>
+			<div class="export-row">
+				<span>PNGs (zip)</span>
+				<label>scale <input type="number" id="png-scale" min="1" max="8" value="4"></label>
+				<button type="button" class="ghost" id="export-pngs">Download</button>
+			</div>
+			<div class="export-row">
+				<span>Atlas</span>
+				<button type="button" class="ghost" id="export-atlas">Download</button>
+			</div>
+		</details>
+
+		<details class="panel">
+			<summary>Atlas</summary>
+			<button type="button" class="primary" id="render-atlas">Render atlas</button>
+			<p id="atlas-meta" class="panel-hint"></p>
+			<div id="atlas-view" class="atlas-view" hidden><img id="atlas-img" alt="Composed sprite atlas"></div>
+		</details>
+
+		<details class="panel">
+			<summary>Video library</summary>
+			<div id="studio-videos" class="studio-videos"></div>
+			<p class="panel-hint" id="studio-videos-empty" hidden>no saved videos</p>
+			<label class="toolbar-field">frames <input type="number" id="studio-frames" min="1" max="128" value="96"></label>
+		</details>
+	</aside>
+</div>
+
+<div id="toast" role="status"></div>
+<div id="busy" class="busy" hidden>
+	<div class="busy-inner">
+		<div class="progress show indeterminate"><div class="bar"></div></div>
+		<span id="busy-label"></span>
+	</div>
+</div>
+<script src="/curator/studio.js" defer></script>
+</body>
+</html>
