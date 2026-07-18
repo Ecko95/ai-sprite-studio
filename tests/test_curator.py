@@ -38,6 +38,14 @@ def test_upload_extracts_and_run_snapshot_lists_frames(tmp_path):
     assert all(frame["present"] and frame["url"].startswith("/curator/frame/") for frame in state["frames"])
 
 
+def test_uploader_shows_a_live_working_indicator(tmp_path):
+    with _client(tmp_path) as client:
+        js = client.get("/curator/upload.js").text
+    # ticking elapsed-time feedback + button lock, so a slow extract doesn't look frozen.
+    assert "setInterval" in js and "still working" in js
+    assert "button.disabled = true" in js and "clearInterval" in js
+
+
 def test_upload_multiple_files_become_one_row_of_frames(tmp_path):
     with _client(tmp_path) as client:
         resp = client.post(

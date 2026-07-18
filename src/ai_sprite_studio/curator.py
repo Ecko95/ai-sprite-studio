@@ -32,16 +32,18 @@ _ASSETS = {
     "/curator.js": ("curator.js", "text/javascript; charset=utf-8"),
     "/curator.css": ("curator.css", "text/css; charset=utf-8"),
 }
-# A tiny same-origin uploader (CSP `default-src 'self'` forbids inline script).
+# A tiny same-origin uploader (CSP `default-src 'self'` forbids inline script/style).
 # Sends multipart so one OR many frame images can be posted in a single request.
+# A ticking elapsed-time indicator (text only, CSP-safe) shows it's alive, since the
+# blocking upload+extract request returns no incremental progress.
 _UPLOAD_JS = b"""
 const form = document.getElementById('upload');
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   const files = form.file.files;
   const status = document.getElementById('status');
+  const button = form.querySelector('button');
   if (!files.length) { status.textContent = 'Choose one or more images first.'; return; }
-  status.textContent = 'Uploading and extracting\\u2026';
   const body = new FormData();
   for (const file of files) { body.append('files', file, file.name); }
   const query = new URLSearchParams({
@@ -50,11 +52,26 @@ form.addEventListener('submit', async (event) => {
     cols: form.cols.value,
     rows: form.rows.value,
   });
-  const res = await fetch('/curator/upload?' + query.toString(), { method: 'POST', body });
-  if (res.ok) { window.location = '/curator'; return; }
-  let message = res.statusText;
-  try { message = (await res.json()).error || message; } catch (_e) {}
-  status.textContent = 'Failed: ' + message;
+  button.disabled = true;
+  const started = Date.now();
+  let tick = 0;
+  const timer = setInterval(() => {
+    const seconds = Math.round((Date.now() - started) / 1000);
+    const dots = '.'.repeat(1 + (tick++ % 3));
+    status.textContent = 'Uploading & extracting' + dots + ' (' + seconds + 's, still working)';
+  }, 300);
+  try {
+    const res = await fetch('/curator/upload?' + query.toString(), { method: 'POST', body });
+    if (res.ok) { status.textContent = 'Done \\u2014 opening curator\\u2026'; window.location = '/curator'; return; }
+    let message = res.statusText;
+    try { message = (await res.json()).error || message; } catch (_e) {}
+    status.textContent = 'Failed: ' + message;
+  } catch (err) {
+    status.textContent = 'Failed: ' + err;
+  } finally {
+    clearInterval(timer);
+    button.disabled = false;
+  }
 });
 """
 
