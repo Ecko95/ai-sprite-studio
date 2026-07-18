@@ -88,6 +88,83 @@ def prep_to_chroma(data: bytes, *, tolerance: int, pad: float) -> bytes:
     return buffer.getvalue()
 
 
+def _load_rgba(data: bytes) -> Image.Image:
+    with Image.open(BytesIO(data)) as opened:
+        return opened.convert("RGBA")
+
+
+def _png(image: Image.Image) -> bytes:
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _even(value: int) -> int:
+    return value & ~1
+
+
+def normalize_frames(pixels: list[bytes], plains: list[bytes]) -> tuple[list[bytes], list[bytes]]:
+    """Auto scale + recenter canonical 256x256 frames without breaking the contract.
+
+    One shared integer nearest-neighbour factor (so relative frame sizes never
+    wobble), each frame's content horizontally centred on x=128 (snapped to the
+    2px logical grid) and its bottom row locked to y=255 (the foot anchor).
+    The plain display twin gets the same geometry so the pixel-perfect toggle
+    stays aligned.
+    """
+    images = [_load_rgba(data) for data in pixels]
+    boxes = [image.getchannel("A").getbbox() for image in images]
+    sizes = [(box[2] - box[0], box[3] - box[1]) for box in boxes if box is not None]
+    if not sizes:
+        return pixels, plains
+    factor = max(1, min(256 // max(w for w, _ in sizes), 256 // max(h for _, h in sizes)))
+
+    out_pixels: list[bytes] = []
+    out_plains: list[bytes] = []
+    for index, (image, box) in enumerate(zip(images, boxes)):
+        plain = _load_rgba(plains[index]) if index < len(plains) else None
+        if box is None:
+            out_pixels.append(pixels[index])
+            if index < len(plains):
+                out_plains.append(plains[index])
+            continue
+        width, height = box[2] - box[0], box[3] - box[1]
+        offset_x = _even(128 - (factor * width) // 2)
+        offset_y = 256 - factor * height
+        for source, sink in ((image, out_pixels), (plain, out_plains)):
+            if source is None:
+                continue
+            content = source.crop(box).resize((factor * width, factor * height), Image.NEAREST)
+            canvas = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+            canvas.paste(content, (offset_x, offset_y))
+            sink.append(_png(canvas))
+    return out_pixels, out_plains
+
+
+def nudge_frame(pixel: bytes, plain: bytes | None, dx: int) -> tuple[bytes, bytes | None]:
+    """Shift one frame's content horizontally by an even pixel amount, clamped in-bounds.
+
+    Vertical nudges are refused upstream: the canonical contract locks the
+    content's bottom row to the cell bottom (foot anchor).
+    """
+    dx = _even(dx)
+    image = _load_rgba(pixel)
+    box = image.getchannel("A").getbbox()
+    if box is None or dx == 0:
+        return pixel, plain
+    dx = max(-box[0], min(256 - box[2], dx))
+    results: list[bytes | None] = []
+    for data in (pixel, plain):
+        if data is None:
+            results.append(None)
+            continue
+        source = _load_rgba(data)
+        canvas = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+        canvas.paste(source.crop(box), (box[0] + dx, box[1]))
+        results.append(_png(canvas))
+    return results[0], results[1]
+
+
 def frames_to_row(frames: list[bytes]) -> bytes:
     """Lay independent frame images side by side into one 1xN row.
 
