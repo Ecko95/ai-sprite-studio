@@ -14,14 +14,16 @@ and AI frame edit is Task 6; direction groups/anchors are Task 7.
 from __future__ import annotations
 
 from importlib.resources import files
+from io import BytesIO
 import json
 from uuid import UUID
+import zipfile
 
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from .contracts import ProjectConfig
-from .imaging import frames_from_sheet, frames_to_row, grid_to_row
+from .imaging import frames_from_sheet, frames_to_gif, frames_to_row, grid_to_row, scale_nearest
 from .project_store import ProjectStoreError
 from .sprite_engine import SpriteEngine, SpriteEngineError
 
@@ -337,22 +339,65 @@ async def download(request) -> Response:
     if project_id is None:
         return _error("no active run", status_code=409)
     kind = request.path_params.get("kind", "")
-    if kind != "atlas":
-        # PNG/GIF export is Task 11; per-state gif needs the same exporter.
-        return _error("export is not available yet", status_code=501)
+    engine = _engine(request)
+    store = request.app.state.store
 
-    def run() -> bytes:
-        result = _engine(request).compose(project_id)
-        return request.app.state.store.read_artifact_bytes(
-            project_id, result.atlas_artifact_id
+    if kind == "atlas":
+
+        def run_atlas() -> bytes:
+            result = engine.compose(project_id)
+            return store.read_artifact_bytes(project_id, result.atlas_artifact_id)
+
+        try:
+            data = await run_in_threadpool(run_atlas)
+        except (SpriteEngineError, ProjectStoreError) as exc:
+            return _error(str(exc), status_code=400)
+        return Response(
+            data,
+            media_type="image/png",
+            headers={"X-Filename": "sprite-sheet-alpha.png"},
         )
 
+    if kind not in {"pngs", "gifs", "gif"}:
+        return _error("unknown export kind", status_code=404)
     try:
-        data = await run_in_threadpool(run)
-    except (SpriteEngineError, ProjectStoreError) as exc:
+        scale = int(request.query_params.get("scale", "4" if kind == "pngs" else "2"))
+        if not 1 <= scale <= 8:
+            raise ValueError
+    except (TypeError, ValueError):
+        return _error("scale must be an integer between 1 and 8", status_code=400)
+
+    def run_export() -> tuple[bytes, str, str]:
+        view = engine.run_snapshot(project_id)
+        frames = [
+            store.read_artifact_bytes(project_id, artifact_id)
+            for artifact_id in _curated_frame_ids(view)
+        ]
+        if not frames:
+            raise SpriteEngineError("no selected frames to export")
+        if kind == "pngs":
+            archive = BytesIO()
+            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+                for index, data in enumerate(frames):
+                    bundle.writestr(f"frame-{index:02d}.png", scale_nearest(data, scale))
+            return archive.getvalue(), "application/zip", "frames-1024.zip" if scale == 4 else "frames.zip"
+        gif = frames_to_gif(frames, fps=view.fps, loop=view.loop, factor=scale)
+        return gif, "image/gif", f"{view.state}.gif"
+
+    try:
+        data, media_type, filename = await run_in_threadpool(run_export)
+    except (SpriteEngineError, ProjectStoreError, ValueError) as exc:
         return _error(str(exc), status_code=400)
-    return Response(
-        data,
-        media_type="image/png",
-        headers={"X-Filename": "sprite-sheet-alpha.png"},
-    )
+    return Response(data, media_type=media_type, headers={"X-Filename": filename})
+
+
+def _curated_frame_ids(view) -> list[UUID]:
+    """Selected frame artifact ids in curated order (all frames if uncurated)."""
+    pixel_ids = list(view.pixel_artifact_ids)
+    entry = ((view.curation or {}).get("states") or {}).get("upload") or {}
+    indices = [index for index in entry.get("order", range(len(pixel_ids))) if isinstance(index, int)]
+    selected = entry.get("selected")
+    deleted = set(entry.get("deleted") or ())
+    if selected is not None:
+        indices = [index for index in indices if index in set(selected)]
+    return [pixel_ids[index] for index in indices if 0 <= index < len(pixel_ids) and index not in deleted]

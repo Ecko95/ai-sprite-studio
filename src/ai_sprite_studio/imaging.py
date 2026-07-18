@@ -165,6 +165,42 @@ def nudge_frame(pixel: bytes, plain: bytes | None, dx: int) -> tuple[bytes, byte
     return results[0], results[1]
 
 
+def scale_nearest(data: bytes, factor: int) -> bytes:
+    """Integer nearest-neighbour upscale of one RGBA frame (pixel-perfect)."""
+    if factor <= 1:
+        return data
+    image = _load_rgba(data)
+    return _png(image.resize((image.width * factor, image.height * factor), Image.NEAREST))
+
+
+def frames_to_gif(frames: list[bytes], *, fps: int, loop: bool, factor: int = 1) -> bytes:
+    """Assemble RGBA frames into an animated GIF with clean binary transparency."""
+    if not frames:
+        raise ValueError("no frames to export")
+    duration = max(20, round(1000 / max(1, fps)))
+    converted = []
+    for data in frames:
+        image = _load_rgba(scale_nearest(data, factor))
+        # Binary alpha -> palette with one reserved transparent index.
+        alpha = image.getchannel("A").point(lambda value: 255 if value < 128 else 0)
+        quantized = image.convert("RGB").quantize(colors=255, method=Image.Quantize.FASTOCTREE)
+        quantized.paste(255, mask=alpha)
+        converted.append(quantized)
+    buffer = BytesIO()
+    converted[0].save(
+        buffer,
+        format="GIF",
+        save_all=True,
+        append_images=converted[1:],
+        duration=duration,
+        loop=0 if loop else 1,
+        transparency=255,
+        disposal=2,
+        optimize=False,
+    )
+    return buffer.getvalue()
+
+
 def frames_to_row(frames: list[bytes]) -> bytes:
     """Lay independent frame images side by side into one 1xN row.
 
