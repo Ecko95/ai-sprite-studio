@@ -145,6 +145,20 @@ the locked presets. `--direction` is `down` only until directional anchors exist
 board is an **intermediate** — recover + snap its frames via the frame-recovery stage;
 never grid-crop it (poses cross cell borders by design). Spends OpenAI credits.
 
+### Reshape a grid pose board into a row (`regrid`)
+
+The snap is a **component-row** engine — it reads frames from a **single horizontal
+row (1×N)**. A generated pose board is usually a 2D grid (e.g. 4×3), which the snap
+mis-slices into full-height columns (two stacked poses per "frame"). `regrid` cuts the
+first `--frames` cells in reading order and lines them up in one row:
+
+```bash
+uv run ai-sprite-studio regrid --in poseboard.png --out row.png --cols 4 --rows 3 --frames 8
+```
+
+Then upload `row.png` with **frames = N**. (The proper upstream path is the
+frame-recovery stage; `regrid` is the local bridge until that's built.)
+
 ### Prep an existing image for snapping
 
 The snap keys alpha off the flat `#00FF00` background. An image on white (or any

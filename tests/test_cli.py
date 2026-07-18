@@ -156,6 +156,35 @@ def test_genbase_dry_run_emits_prompt_without_provider_or_store(tmp_path, capsys
     assert out.with_suffix(".png.prompt.md").read_text()  # provenance sidecar written
 
 
+def test_regrid_reshapes_grid_into_a_single_row_in_reading_order(tmp_path):
+    # 4x3 grid, each cell filled with a unique colour keyed to its reading index.
+    cols, rows, cell = 4, 3, 10
+    grid = Image.new("RGB", (cols * cell, rows * cell))
+    for index in range(cols * rows):
+        r, c = divmod(index, cols)
+        for x in range(c * cell, c * cell + cell):
+            for y in range(r * cell, r * cell + cell):
+                grid.putpixel((x, y), (index * 10, 0, 0))
+    src = tmp_path / "grid.png"
+    grid.save(src)
+
+    out = tmp_path / "row.png"
+    assert cli.regrid(source=src, out=out, cols=cols, rows=rows, frames=8) == 0
+
+    result = Image.open(out).convert("RGB")
+    assert result.size == (cell * 8, cell)  # 1x8 row
+    # Each strip cell holds the matching source cell, left-to-right = reading order 0..7.
+    for index in range(8):
+        assert result.getpixel((index * cell + cell // 2, cell // 2)) == (index * 10, 0, 0)
+
+
+def test_regrid_rejects_frame_count_beyond_the_grid(tmp_path):
+    grid = Image.new("RGB", (40, 30))
+    src = tmp_path / "g.png"
+    grid.save(src)
+    assert cli.regrid(source=src, out=tmp_path / "r.png", cols=4, rows=3, frames=13) == 1
+
+
 def test_prep_floods_border_background_to_chroma_and_keeps_interior(tmp_path):
     # White canvas, black frame, white interior hole — the hole must survive.
     img = Image.new("RGB", (40, 40), "white")

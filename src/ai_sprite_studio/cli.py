@@ -88,6 +88,39 @@ def _prep_to_chroma(data: bytes, *, tolerance: int, pad: float) -> bytes:
     return buffer.getvalue()
 
 
+def _grid_to_row(data: bytes, *, cols: int, rows: int, frames: int) -> bytes:
+    """Re-lay an NxM grid pose board into a single horizontal 1xN row.
+
+    The snap is a component-row engine (one horizontal row of frames); a 2D grid
+    gets sliced into full-height columns (two stacked poses per 'frame'). This cuts
+    the first `frames` cells in reading order and lines them up in one row.
+    """
+    from PIL import Image
+
+    with Image.open(BytesIO(data)) as opened:
+        img = opened.convert("RGB")
+    width, height = img.size
+    cell_w, cell_h = width // cols, height // rows
+    strip = Image.new("RGB", (cell_w * frames, cell_h), _CHROMA)
+    for index in range(frames):
+        row, col = divmod(index, cols)
+        cell = img.crop((col * cell_w, row * cell_h, col * cell_w + cell_w, row * cell_h + cell_h))
+        strip.paste(cell, (index * cell_w, 0))
+    buffer = BytesIO()
+    strip.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def regrid(*, source: Path, out: Path, cols: int, rows: int, frames: int) -> int:
+    if not 1 <= frames <= cols * rows:
+        print(f"--frames must be 1..{cols * rows} for a {cols}x{rows} grid", file=sys.stderr)
+        return 1
+    out = Path(out)
+    out.write_bytes(_grid_to_row(Path(source).read_bytes(), cols=cols, rows=rows, frames=frames))
+    print(f"wrote {out}  (1x{frames} row; upload with frames={frames})")
+    return 0
+
+
 def prep(*, source: Path, out: Path, tolerance: int, pad: float) -> int:
     out = Path(out)
     out.write_bytes(_prep_to_chroma(Path(source).read_bytes(), tolerance=tolerance, pad=pad))
@@ -313,6 +346,13 @@ def main(argv: list[str] | None = None) -> int:
     act_parser.add_argument("--quality", default="high", choices=["low", "medium", "high", "auto"])
     act_parser.add_argument("--dry-run", dest="dry_run", action="store_true", help="print the ready-to-paste prompt (no provider call, no key); for manual ChatGPT/Codex generation")
 
+    regrid_parser = commands.add_parser("regrid", help="reshape an NxM grid pose board into a 1xN row the snap can read")
+    regrid_parser.add_argument("--in", dest="source", type=Path, required=True)
+    regrid_parser.add_argument("--out", type=Path, default=Path("row.png"))
+    regrid_parser.add_argument("--cols", type=int, required=True, help="columns in the source grid")
+    regrid_parser.add_argument("--rows", type=int, required=True, help="rows in the source grid")
+    regrid_parser.add_argument("--frames", type=int, required=True, help="number of filled cells (reading order)")
+
     prep_parser = commands.add_parser("prep", help="strip a flat background to chroma green so an existing image snaps cleanly")
     prep_parser.add_argument("--in", dest="source", type=Path, required=True)
     prep_parser.add_argument("--out", type=Path, default=Path("prepped.png"))
@@ -320,6 +360,8 @@ def main(argv: list[str] | None = None) -> int:
     prep_parser.add_argument("--pad", type=float, default=0.1, help="green margin as a fraction of the longest side; 0 keeps size")
 
     arguments = parser.parse_args(argv)
+    if arguments.command == "regrid":
+        return regrid(source=arguments.source, out=arguments.out, cols=arguments.cols, rows=arguments.rows, frames=arguments.frames)
     if arguments.command == "prep":
         return prep(source=arguments.source, out=arguments.out, tolerance=arguments.tolerance, pad=arguments.pad)
     if arguments.command == "genactions":
