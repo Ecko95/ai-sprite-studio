@@ -177,6 +177,29 @@ def test_combine_stitches_independent_frames_into_a_row(tmp_path):
         assert result.getpixel((index * cell_w + cell_w // 2, cell_h // 2)) == (index * 20 + 20, 0, 0)
 
 
+def test_autosplit_detects_frames_by_background_gaps_ignoring_empty_space(tmp_path):
+    from ai_sprite_studio.imaging import frames_from_sheet
+
+    # Green sheet, 2x2 blocks with margins + a wholly-empty bottom third (like the
+    # ghost sheet). Detection must find 4 in reading order, skipping the empty band.
+    sheet = Image.new("RGB", (150, 150), (0, 255, 0))
+    spots = [(10, 10), (90, 10), (10, 60), (90, 60)]  # row-major, gaps between
+    for index, (x, y) in enumerate(spots):
+        for dx in range(30):
+            for dy in range(30):
+                sheet.putpixel((x + dx, y + dy), (10 + index * 40, 0, 0))
+    src = tmp_path / "sheet.png"
+    sheet.save(src)
+
+    frames = frames_from_sheet(src.read_bytes())
+    assert len(frames) == 4
+    colours = [Image.open(io.BytesIO(f)).convert("RGB").getpixel((15, 15)) for f in frames]
+    assert colours == [(10, 0, 0), (50, 0, 0), (90, 0, 0), (130, 0, 0)]  # reading order
+
+    out = tmp_path / "row.png"
+    assert cli.autosplit(source=src, out=out) == 0
+
+
 def test_regrid_reshapes_grid_into_a_single_row_in_reading_order(tmp_path):
     # 4x3 grid, each cell filled with a unique colour keyed to its reading index.
     cols, rows, cell = 4, 3, 10

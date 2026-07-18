@@ -21,6 +21,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from .contracts import ProjectConfig
+from .imaging import frames_from_sheet, frames_to_row, grid_to_row
 from .project_store import ProjectStoreError
 from .sprite_engine import SpriteEngine, SpriteEngineError
 
@@ -31,29 +32,47 @@ _ASSETS = {
     "/curator.js": ("curator.js", "text/javascript; charset=utf-8"),
     "/curator.css": ("curator.css", "text/css; charset=utf-8"),
 }
-# A tiny same-origin uploader (CSP `default-src 'self'` forbids inline script).
+# A tiny same-origin uploader (CSP `default-src 'self'` forbids inline script/style).
+# Sends multipart so one OR many frame images can be posted in a single request.
+# A ticking elapsed-time indicator (text only, CSP-safe) shows it's alive, since the
+# blocking upload+extract request returns no incremental progress.
 _UPLOAD_JS = b"""
 const form = document.getElementById('upload');
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
-  const file = form.file.files[0];
+  const files = form.file.files;
   const status = document.getElementById('status');
-  if (!file) { status.textContent = 'Choose an image first.'; return; }
-  status.textContent = 'Uploading and extracting\\u2026';
+  const button = form.querySelector('button');
+  if (!files.length) { status.textContent = 'Choose one or more images first.'; return; }
+  const body = new FormData();
+  for (const file of files) { body.append('files', file, file.name); }
   const query = new URLSearchParams({
     frames: form.frames.value,
-    filename: file.name,
     segmentation: form.segmentation.value,
+    cols: form.cols.value,
+    rows: form.rows.value,
+    autosplit: form.autosplit.checked ? '1' : '0',
   });
-  const res = await fetch('/curator/upload?' + query.toString(), {
-    method: 'POST',
-    headers: { 'Content-Type': file.type || 'application/octet-stream' },
-    body: file,
-  });
-  if (res.ok) { window.location = '/curator'; return; }
-  let message = res.statusText;
-  try { message = (await res.json()).error || message; } catch (_e) {}
-  status.textContent = 'Failed: ' + message;
+  button.disabled = true;
+  const started = Date.now();
+  let tick = 0;
+  const timer = setInterval(() => {
+    const seconds = Math.round((Date.now() - started) / 1000);
+    const dots = '.'.repeat(1 + (tick++ % 3));
+    status.textContent = 'Uploading & extracting' + dots + ' (' + seconds + 's, still working)';
+  }, 300);
+  try {
+    const res = await fetch('/curator/upload?' + query.toString(), { method: 'POST', body });
+    if (res.ok) { status.textContent = 'Done \\u2014 opening curator\\u2026'; window.location = '/curator'; return; }
+    let message = res.statusText;
+    try { message = (await res.json()).error || message; } catch (_e) {}
+    status.textContent = 'Failed: ' + message;
+  } catch (err) {
+    status.textContent = 'Failed: ' + err;
+  } finally {
+    clearInterval(timer);
+    button.disabled = false;
+  }
 });
 """
 
@@ -93,24 +112,53 @@ async def curator_asset(request) -> Response:
 
 
 async def upload(request) -> Response:
+    """Ingest one image, a sprite sheet, or many per-frame images into one snap row.
+
+    - Multiple files      -> stitched into a 1xN row (frames = file count).
+    - One file + autosplit -> frames auto-detected by background gaps (any layout).
+    - One file + cols&rows -> grid reshaped into a row (frames = filled cells).
+    - One file, none set   -> used as-is (a single frame or an existing row).
+    """
     try:
         frames = int(request.query_params.get("frames", "1"))
-        filename = request.query_params.get("filename", "upload.png")
         segmentation = request.query_params.get("segmentation", "components")
-        media_type = request.headers.get("content-type", "").split(";")[0].strip()
-        data = await request.body()
+        cols = int(request.query_params.get("cols", "0") or 0)
+        rows = int(request.query_params.get("rows", "0") or 0)
+        autosplit = request.query_params.get("autosplit") in {"1", "true", "on"}
+        form = await request.form()
+        uploads = form.getlist("files")
+        payloads = [(part.filename or "frame.png", await part.read()) for part in uploads]
     except (TypeError, ValueError):
         return _error("invalid upload request", status_code=400)
-    if not data or len(data) > _MAX_UPLOAD:
-        return _error("invalid upload", status_code=400)
+    payloads = [(name, blob) for name, blob in payloads if blob]
+    if not payloads:
+        return _error("choose one or more images", status_code=400)
+    if sum(len(blob) for _, blob in payloads) > _MAX_UPLOAD:
+        return _error("upload too large", status_code=400)
+
+    project_name = payloads[0][0] or "Upload"
+    if len(payloads) > 1:
+        data, media_type, upload_name, frames = frames_to_row([blob for _, blob in payloads]), "image/png", "upload.png", len(payloads)
+    elif autosplit:
+        detected = frames_from_sheet(payloads[0][1])
+        if not detected:
+            return _error("no frames detected on the sheet (is the background a flat colour?)", status_code=400)
+        data, media_type, upload_name, frames = frames_to_row(detected), "image/png", "upload.png", len(detected)
+    elif cols > 0 and rows > 0:
+        if not 1 <= frames <= cols * rows:
+            frames = cols * rows
+        data, media_type, upload_name = grid_to_row(payloads[0][1], cols=cols, rows=rows, frames=frames), "image/png", "upload.png"
+    else:
+        data = payloads[0][1]
+        media_type = (uploads[0].content_type or "").split(";")[0].strip()
+        upload_name = payloads[0][0]
+
     engine = _engine(request)
     store = request.app.state.store
 
     def run() -> UUID:
-        project = store.create(ProjectConfig(name=filename or "Upload"))
-        uploaded = engine.ingest_upload(
-            project.id, data, media_type=media_type, filename=filename
-        )
+        project = store.create(ProjectConfig(name=project_name))
+        uploaded = engine.ingest_upload(project.id, data, media_type=media_type, filename=upload_name)
         engine.prepare(project.id, uploaded.id, frames=frames)
         engine.extract(project.id, segmentation=segmentation)
         return project.id

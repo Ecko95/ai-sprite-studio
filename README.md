@@ -92,6 +92,13 @@ uv run ai-sprite-studio serve --workspace /path/to/workspace
 `serve` binds to `127.0.0.1`, prints the actual URL (e.g. `http://127.0.0.1:8765/`)
 to stdout, and attempts to open a browser. Stop with `Ctrl-C`.
 
+The upload form takes **one image, a grid sheet, or several per-frame images** in one
+step (the same reshaping as the `combine`/`regrid` CLI commands, done server-side):
+
+- **Multiple files** → stitched into one row, one image per frame (frame count = files).
+- **One file + grid cols/rows** → the sheet is reshaped into a row (e.g. `4×3`).
+- **One file, grid left at 0** → used as-is (a single frame or an existing row + frames/segmentation).
+
 ### Generate a base character (gpt-image)
 
 `genbase` renders the pinned `base_generation` prompt (from
@@ -156,6 +163,21 @@ uv run ai-sprite-studio combine --out row.png frame1.png frame2.png frame3.png
 ```
 
 Then upload `row.png` with **frames = N**.
+
+### Auto-detect frames on a sprite sheet (`autosplit`)
+
+`autosplit` finds frames on a sheet by its **background gaps** — no cols/rows to
+guess. It samples the background colour, then splits into content row-bands and
+column-segments, so outer margins, uneven spacing, and empty rows are skipped and
+each frame is cropped to its true content box:
+
+```bash
+uv run ai-sprite-studio autosplit --in poseboard.png --out row.png
+```
+
+In the web UI this is the **"Sprite sheet — auto-detect frames"** checkbox (recommended
+for any sheet). `regrid` (below) is the manual fallback when you want to force an exact
+grid.
 
 ### Reshape a grid pose board into a row (`regrid`)
 

@@ -10,9 +10,9 @@ def _client(tmp_path):
 
 def _upload(client, *, frames=2, segmentation="components"):
     return client.post(
-        f"/curator/upload?frames={frames}&filename=ranger.png&segmentation={segmentation}",
-        content=_strip_png(frames=frames),
-        headers={"Origin": "http://127.0.0.1", "Content-Type": "image/png"},
+        f"/curator/upload?frames={frames}&segmentation={segmentation}",
+        files={"files": ("ranger.png", _strip_png(frames=frames), "image/png")},
+        headers={"Origin": "http://127.0.0.1"},
     )
 
 
@@ -36,6 +36,53 @@ def test_upload_extracts_and_run_snapshot_lists_frames(tmp_path):
     assert state["name"] == "upload"
     assert len(state["frames"]) == 2
     assert all(frame["present"] and frame["url"].startswith("/curator/frame/") for frame in state["frames"])
+
+
+def test_uploader_shows_a_live_working_indicator(tmp_path):
+    with _client(tmp_path) as client:
+        js = client.get("/curator/upload.js").text
+    # ticking elapsed-time feedback + button lock, so a slow extract doesn't look frozen.
+    assert "setInterval" in js and "still working" in js
+    assert "button.disabled = true" in js and "clearInterval" in js
+
+
+def test_upload_multiple_files_become_one_row_of_frames(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.post(
+            "/curator/upload?segmentation=components",
+            files=[("files", (f"f{i}.png", _strip_png(frames=1), "image/png")) for i in range(3)],
+            headers={"Origin": "http://127.0.0.1"},
+        )
+        run = client.get("/api/run").json()
+    assert resp.status_code == 201
+    (state,) = run["states"]
+    assert len(state["frames"]) == 3  # 3 separate images -> 3 frames
+
+
+def test_upload_autosplit_detects_frames_on_a_sheet(tmp_path):
+    # A 3-frame sheet posted with autosplit=1 (frames field left at default 4):
+    # auto-detection by background gaps must recover 3, not obey the frames field.
+    with _client(tmp_path) as client:
+        resp = client.post(
+            "/curator/upload?autosplit=1&frames=4&segmentation=components",
+            files={"files": ("sheet.png", _strip_png(frames=3), "image/png")},
+            headers={"Origin": "http://127.0.0.1"},
+        )
+        run = client.get("/api/run").json()
+    assert resp.status_code == 201
+    assert len(run["states"][0]["frames"]) == 3
+
+
+def test_upload_single_grid_sheet_reshapes_via_cols_rows(tmp_path):
+    with _client(tmp_path) as client:
+        resp = client.post(
+            "/curator/upload?cols=4&rows=1&frames=4&segmentation=components",
+            files={"files": ("sheet.png", _strip_png(frames=4), "image/png")},
+            headers={"Origin": "http://127.0.0.1"},
+        )
+        run = client.get("/api/run").json()
+    assert resp.status_code == 201
+    assert len(run["states"][0]["frames"]) == 4
 
 
 def test_uploaded_frame_bytes_are_served_as_png(tmp_path):

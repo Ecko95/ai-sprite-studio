@@ -15,6 +15,7 @@ dependencies = [
     "pillow>=12,<13",
     "pydantic",
     "python-dotenv>=1.2.2",
+    "python-multipart>=0.0.32",
     "sprite-gen",
     "starlette",
     "uvicorn",
